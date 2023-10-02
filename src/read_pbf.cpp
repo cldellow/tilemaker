@@ -331,7 +331,6 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 	for(auto phase: all_phases) {
 		boost::latch latch(blocks.size());
 		{
-			// TODO: re-enable
 			const std::lock_guard<std::mutex> lock(block_mutex);
 			for(auto const &block: blocks) {
 				boost::asio::post(pool, [=, progress=std::make_pair(block.first, total_blocks), block=block.second, &blocks, &block_mutex, &nodeKeys, &latch]() {
