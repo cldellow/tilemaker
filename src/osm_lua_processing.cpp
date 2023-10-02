@@ -1,6 +1,9 @@
 #include "osm_lua_processing.h"
 #include "helpers.h"
 #include <iostream>
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 
 
 using namespace std;
@@ -32,6 +35,8 @@ OsmLuaProcessing::OsmLuaProcessing(
 	config(configIn),
 	layers(layers) {
 
+	pid_t x = syscall(__NR_gettid);
+	cout << "OsmLuaProcessing ctor " << x << endl;
 	// ----	Initialise Lua
 	g_luaState = &luaState;
 	luaState.setErrorHandler(lua_error_handler);

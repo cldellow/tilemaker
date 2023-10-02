@@ -325,9 +325,11 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 	std::size_t total_blocks = blocks.size();
 
 	std::vector<ReadPhase> all_phases = { ReadPhase::Nodes, ReadPhase::RelationScan, ReadPhase::Ways, ReadPhase::Relations };
+	cout << "making pool of size " << threadNum << endl;
+	// Launch the pool with threadNum threads
+	boost::asio::thread_pool pool(threadNum);
+
 	for(auto phase: all_phases) {
-		// Launch the pool with threadNum threads
-		boost::asio::thread_pool pool(threadNum);
 
 		{
 			const std::lock_guard<std::mutex> lock(block_mutex);

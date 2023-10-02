@@ -207,7 +207,15 @@ waterwayClasses = Set { "stream", "river", "canal", "drain", "ditch" }
 -- Scan relations for use in ways
 
 function relation_scan_function(relation)
+	if relation:Find("type")=="boundary" then
+		print(relation:Find("boundary"))
+	end
 	if relation:Find("type")=="boundary" and relation:Find("boundary")=="administrative" then
+		relation:Accept()
+	end
+
+	if relation:Find("type")=="boundary" and relation:Find("boundary")=="national_park" then
+		print('ACCEPTED national_park')
 		relation:Accept()
 	end
 end
@@ -555,6 +563,14 @@ function way_function(way)
 		if write_name then rank=6 else rank=25 end
 		way:AttributeNumeric("rank", rank)
 	end
+end
+
+function relation_function(relation)
+  if relation:Find("type")=="boundary" and relation:Find("boundary")=="national_park" then
+		print("EMITTING national_park")
+    relation:Layer("landcover", true)
+    relation:Attribute("class", "national_park")
+  end
 end
 
 -- Remap coastlines
