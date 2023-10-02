@@ -3,6 +3,7 @@
 #include "pbf_blocks.h"
 
 #include <boost/interprocess/streams/bufferstream.hpp>
+#include <boost/thread/latch.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/post.hpp>
 #include <unordered_set>
@@ -328,10 +329,12 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 	// Launch the pool with threadNum threads
 	boost::asio::thread_pool pool(threadNum);
 	for(auto phase: all_phases) {
+		boost::latch latch(blocks.size());
 		{
+			// TODO: re-enable
 			const std::lock_guard<std::mutex> lock(block_mutex);
 			for(auto const &block: blocks) {
-				boost::asio::post(pool, [=, progress=std::make_pair(block.first, total_blocks), block=block.second, &blocks, &block_mutex, &nodeKeys]() {
+				boost::asio::post(pool, [=, progress=std::make_pair(block.first, total_blocks), block=block.second, &blocks, &block_mutex, &nodeKeys, &latch]() {
 					auto infile = generate_stream();
 					auto output = generate_output();
 
@@ -340,11 +343,13 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 						const std::lock_guard<std::mutex> lock(block_mutex);
 						blocks.erase(progress.first);	
 					}
+
+					latch.count_down();
 				});
 			}
 		}
 	
-		pool.join();
+		latch.wait();
 
 		if(phase == ReadPhase::Nodes) {
 			osmStore.nodes_sort(threadNum);
@@ -352,7 +357,9 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 		if(phase == ReadPhase::Ways) {
 			osmStore.ways_sort(threadNum);
 		}
+
 	}
+	pool.join();
 
 	// ---- Sort the generated geometries
 	osmStore.generated_sort(threadNum);
