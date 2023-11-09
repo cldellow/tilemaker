@@ -115,15 +115,16 @@ string OsmLuaProcessing::Id() const {
 }
 
 // Check if there's a value for a given key
-bool OsmLuaProcessing::Holds(const string& key) const {
-	return currentTags->find(key) != currentTags->end();
+bool OsmLuaProcessing::Holds(const CharStarWithSize& key) const {
+	return currentTags->getValueIndex(key) != -1;
 }
 
 // Get an OSM tag for a given key (or return empty string if none)
-const string& OsmLuaProcessing::Find(const string& key) const {
-	auto it = currentTags->find(key);
-	if(it == currentTags->end()) return EMPTY_STRING;
-	return it->second;
+const string& OsmLuaProcessing::Find(const CharStarWithSize& key) const {
+	auto index = currentTags->getValueIndex(key);
+	if (index == -1) return EMPTY_STRING;
+
+	return currentTags->getValueForIndex(index);
 }
 
 // ----	Spatial queries called from Lua
@@ -557,7 +558,8 @@ bool OsmLuaProcessing::scanRelation(WayID id, const tag_map_t &tags) {
 	}
 	if (!relationAccepted) return false;
 	
-	osmStore.store_relation_tags(id, tags);
+	// Copy the tag map into long-lived std::strings for future use.
+	osmStore.store_relation_tags(id, tags.as_boost_map());
 	return true;
 }
 

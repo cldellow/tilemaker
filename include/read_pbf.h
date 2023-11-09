@@ -7,6 +7,7 @@
 #include <vector>
 #include <map>
 #include "osm_store.h"
+#include "osm_tags.h"
 
 // Protobuf
 #include "osmformat.pb.h"
@@ -34,14 +35,16 @@ public:
 			pbfreader_generate_output const &generate_output);
 
 	// Read tags into a map from a way/node/relation
-	using tag_map_t = boost::container::flat_map<std::string, std::string>;
+	using tag_map_t = OsmTagMap;
 	template<typename T>
 	void readTags(T &pbfObject, PrimitiveBlock const &pb, tag_map_t &tags) {
-		tags.reserve(pbfObject.keys_size());
+		tags.clear();
+		//tags.reserve(pbfObject.keys_size());
 		auto keysPtr = pbfObject.mutable_keys();
 		auto valsPtr = pbfObject.mutable_vals();
 		for (uint n=0; n < pbfObject.keys_size(); n++) {
-			tags[pb.stringtable().s(keysPtr->Get(n))] = pb.stringtable().s(valsPtr->Get(n));
+			tags.add(pb.stringtable().s(keysPtr->Get(n)), valsPtr->Get(n));
+			//tags[pb.stringtable().s(keysPtr->Get(n))] = pb.stringtable().s(valsPtr->Get(n));
 		}
 	}
 

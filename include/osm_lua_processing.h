@@ -8,6 +8,7 @@
 #include <map>
 #include "geom.h"
 #include "osm_store.h"
+#include "osm_tags.h"
 #include "shared_data.h"
 #include "output_object.h"
 #include "shp_mem_tiles.h"
@@ -66,7 +67,7 @@ public:
 
 	// ----	Data loading methods
 
-	using tag_map_t = boost::container::flat_map<std::string, std::string>;
+	using tag_map_t = OsmTagMap;
 
 	// Scan non-MP relation
 	bool scanRelation(WayID id, const tag_map_t &tags);
@@ -89,10 +90,12 @@ public:
 	std::string Id() const;
 
 	// Check if there's a value for a given key
-	bool Holds(const std::string& key) const;
+	//bool Holds(const char* key) const;
+	bool Holds(const CharStarWithSize& key) const;
 
 	// Get an OSM tag for a given key (or return empty string if none)
-	const std::string& Find(const std::string& key) const;
+	//const std::string& Find(const char* key) const;
+	const std::string& Find(const CharStarWithSize& key) const;
 
 	// ----	Spatial queries called from Lua
 
@@ -249,7 +252,7 @@ private:
 	class LayerDefinition &layers;
 	
 	std::deque<std::pair<OutputObjectRef, AttributeStoreRef>> outputs;			///< All output objects that have been created
-	const boost::container::flat_map<std::string, std::string>* currentTags;
+	const tag_map_t* currentTags;
 };
 
 #endif //_OSM_LUA_PROCESSING_H

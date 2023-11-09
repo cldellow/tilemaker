@@ -386,6 +386,8 @@ int main(int argc, char* argv[]) {
 			sharedData.mbtiles.writeMetadata("center",center.str());
 		}
 	}
+	// TODO: stop before writing
+//	return 0;
 
 	// ----	Write out data
 
