@@ -207,11 +207,10 @@ bool PbfReader::ReadRelations(OsmLuaProcessing &output, PrimitiveGroup &pg, Prim
 }
 
 // Returns true when block was completely handled, thus could be omited by another phases.
-bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::pair<std::size_t, std::size_t> progress, std::size_t datasize, 
+bool PbfReader::ReadBlock(PrimitiveBlock* pb, std::istream &infile, OsmLuaProcessing &output, std::pair<std::size_t, std::size_t> progress, std::size_t datasize, 
                           unordered_set<string> const &nodeKeys, bool locationsOnWays, ReadPhase phase) 
 {
-	PrimitiveBlock pb;
-	readBlock(&pb, datasize, infile);
+	readBlock(pb, datasize, infile);
 	if (infile.eof()) {
 		return true;
 	}
@@ -222,12 +221,12 @@ bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::p
 	// Read the string table, and pre-calculate the positions of valid node keys
 	unordered_set<int> nodeKeyPositions;
 	for (auto it : nodeKeys) {
-		nodeKeyPositions.insert(findStringPosition(pb, it.c_str()));
+		nodeKeyPositions.insert(findStringPosition(*pb, it.c_str()));
 	}
 
-	for (int i=0; i<pb.primitivegroup_size(); i++) {
+	for (int i=0; i<pb->primitivegroup_size(); i++) {
 		PrimitiveGroup pg;
-		pg = pb.primitivegroup(i);
+		pg = pb->primitivegroup(i);
 	
 		auto output_progress = [&]()
 		{
@@ -239,7 +238,7 @@ bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::p
 		};
 
 		if(phase == ReadPhase::Nodes || phase == ReadPhase::All) {
-			bool done = ReadNodes(output, pg, pb, nodeKeyPositions);
+			bool done = ReadNodes(output, pg, *pb, nodeKeyPositions);
 			if(done) { 
 				output_progress();
 				++read_groups;
@@ -249,7 +248,7 @@ bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::p
 
 		if(phase == ReadPhase::RelationScan || phase == ReadPhase::All) {
 			osmStore.ensure_used_ways_inited();
-			bool done = ScanRelations(output, pg, pb);
+			bool done = ScanRelations(output, pg, *pb);
 			if(done) { 
 				std::cout << "(Scanning for ways used in relations: " << (100*progress.first/progress.second) << "%)\r";
 				std::cout.flush();
@@ -258,7 +257,7 @@ bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::p
 		}
 	
 		if(phase == ReadPhase::Ways || phase == ReadPhase::All) {
-			bool done = ReadWays(output, pg, pb, locationsOnWays);
+			bool done = ReadWays(output, pg, *pb, locationsOnWays);
 			if(done) { 
 				output_progress();
 				++read_groups;
@@ -267,7 +266,7 @@ bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::p
 		}
 
 		if(phase == ReadPhase::Relations || phase == ReadPhase::All) {
-			bool done = ReadRelations(output, pg, pb);
+			bool done = ReadRelations(output, pg, *pb);
 			if(done) { 
 				output_progress();
 				++read_groups;
@@ -284,7 +283,7 @@ bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::p
 	// In later case block would not be handled during this phase, and should be
 	// read again in remaining phases. Thus we return false to indicate that the
 	// block was not handled completelly.
-	if(read_groups != pb.primitivegroup_size()) {
+	if(read_groups != pb->primitivegroup_size()) {
 		return false;
 	}
 
@@ -324,6 +323,7 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 
 
 	std::mutex block_mutex;
+	std::mutex primitive_block_pool_mutex;
 
 	std::size_t total_blocks = blocks.size();
 
@@ -332,18 +332,43 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 		// Launch the pool with threadNum threads
 		boost::asio::thread_pool pool(threadNum);
 
+		// Create threadNum PrimitiveBlocks, to be re-used by the ReadBlock operations.
+		std::vector<PrimitiveBlock> primitiveBlocks;
+
+		// A pool of pointers, they'll be leased by the threads.
+		std::vector<PrimitiveBlock*> primitiveBlockPtrs;
+		for (auto i = 0; i < threadNum; i++) {
+			primitiveBlocks.push_back(PrimitiveBlock());
+			primitiveBlockPtrs.push_back(&primitiveBlocks[primitiveBlocks.size() - 1]);
+		}
+
 		{
 			const std::lock_guard<std::mutex> lock(block_mutex);
 			for(auto const &block: blocks) {
-				boost::asio::post(pool, [=, progress=std::make_pair(block.first, total_blocks), block=block.second, &blocks, &block_mutex, &nodeKeys]() {
+				boost::asio::post(pool, [=, progress=std::make_pair(block.first, total_blocks), block=block.second, &blocks, &block_mutex, &nodeKeys, &primitiveBlockPtrs, &primitive_block_pool_mutex]() {
 					auto infile = generate_stream();
 					auto output = generate_output();
 
 					infile->seekg(block.first);
-					if(ReadBlock(*infile, *output, progress, block.second, nodeKeys, locationsOnWays, phase)) {
+
+					PrimitiveBlock* pbPtr = NULL;
+
+					{
+						const std::lock_guard<std::mutex> pbPtrLock(primitive_block_pool_mutex);
+						pbPtr = primitiveBlockPtrs.back();
+						primitiveBlockPtrs.pop_back();
+					}
+
+					if(ReadBlock(pbPtr, *infile, *output, progress, block.second, nodeKeys, locationsOnWays, phase)) {
 						const std::lock_guard<std::mutex> lock(block_mutex);
 						blocks.erase(progress.first);	
 					}
+
+					{
+						const std::lock_guard<std::mutex> pbPtrLock(primitive_block_pool_mutex);
+						primitiveBlockPtrs.push_back(pbPtr);
+					}
+
 				});
 			}
 		}
