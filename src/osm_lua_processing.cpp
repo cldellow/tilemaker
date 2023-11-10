@@ -285,7 +285,8 @@ double OsmLuaProcessing::Length() {
 const Linestring &OsmLuaProcessing::linestringCached() {
 	if (!linestringInited) {
 		linestringInited = true;
-		linestringCache = osmStore.llListLinestring(llVecPtr->cbegin(),llVecPtr->cend());
+		linestringCache.clear();
+		osmStore.llListLinestring(linestringCache, llVecPtr->cbegin(),llVecPtr->cend());
 	}
 	return linestringCache;
 }
@@ -301,7 +302,8 @@ const MultiLinestring &OsmLuaProcessing::multiLinestringCached() {
 const Polygon &OsmLuaProcessing::polygonCached() {
 	if (!polygonInited) {
 		polygonInited = true;
-		polygonCache = osmStore.llListPolygon(llVecPtr->cbegin(), llVecPtr->cend());
+		polygonCache.clear();
+		osmStore.llListPolygon(polygonCache, llVecPtr->cbegin(), llVecPtr->cend());
 	}
 	return polygonCache;
 }
@@ -643,7 +645,8 @@ void OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_ma
 		// create a list of tiles this way passes through (tileSet)
 		unordered_set<TileCoordinates> tileSet;
 		try {
-			Linestring ls = osmStore.llListLinestring(llVecPtr->cbegin(),llVecPtr->cend());
+			Linestring ls;
+			osmStore.llListLinestring(ls, llVecPtr->cbegin(),llVecPtr->cend());
 			insertIntermediateTiles(ls, this->config.baseZoom, tileSet);
 
 			// then, for each tile, store the OutputObject for each layer
