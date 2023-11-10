@@ -642,19 +642,15 @@ public:
 	}
 
 	template<class WayIt>
-	Polygon llListPolygon(WayIt begin, WayIt end) const {
-		Polygon poly;
+	void llListPolygon(Polygon& poly, WayIt begin, WayIt end) const {
 		fillPoints(poly.outer(), begin, end);
 		boost::geometry::correct(poly);
-		return poly;
 	}
 
 	// Way -> Linestring
 	template<class WayIt>
-	Linestring llListLinestring(WayIt begin, WayIt end) const {
-		Linestring ls;
+	void llListLinestring(Linestring& ls, WayIt begin, WayIt end) const {
 		fillPoints(ls, begin, end);
-		return ls;
 	}
 
 private:
