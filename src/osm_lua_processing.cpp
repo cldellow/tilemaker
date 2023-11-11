@@ -359,6 +359,7 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 				mp.push_back(p);
 			}
 
+			std::cout << "name=" << Find("name") << std::endl;
             if(!CorrectGeometry(mp)) return;
 
 			osmStore.store_multi_polygon(osmStore.osm(), osmID, mp);

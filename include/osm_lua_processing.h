@@ -5,8 +5,10 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <time.h>
 #include <map>
 #include "geom.h"
+#include "murmur_hash_3.h"
 #include "osm_store.h"
 #include "shared_data.h"
 #include "output_object.h"
@@ -28,6 +30,81 @@ extern "C" {
 
 // FIXME: why is this global ?
 extern bool verbose;
+
+// Whether or not we should cache the result of is_valid for the given
+// geometry.
+template<class GeometryT>
+bool cacheCorrectGeometry(GeometryT& geom) { return false; }
+
+// Specialization to cacheCorrectGeometry for MultiPolygons, the
+// geometry type for which this function is slowest.
+template<>
+inline bool cacheCorrectGeometry(MultiPolygon& mp) { return true; }
+
+// Temporary functions to help me understand if size correlates with cost
+// of is_valid
+template<class GeometryT>
+uint32_t size1(GeometryT& geom) { return 0; }
+
+template<> inline
+uint32_t size1(MultiPolygon& mp) {
+	uint32_t rv = 0;
+	for (auto poly = mp.begin(); poly != mp.end(); poly++) {
+		rv++;
+		rv += poly->inners().size();
+	}
+	return rv;
+}
+
+template<class GeometryT>
+uint32_t size2(GeometryT& geom) { return 0; }
+
+template<> inline
+uint32_t size2(MultiPolygon& mp) {
+	uint32_t rv = 0;
+	for (auto poly = mp.begin(); poly != mp.end(); poly++) {
+		rv += poly->outer().size();
+		for (const auto& inner: poly->inners()) {
+			rv += inner.size();
+		}
+	}
+	return rv;
+}
+
+
+// Template function to return a hash value for a geometry. The value
+// should change if the identity of the geometry has changed, e.g.
+// a node's point values, a way's points values, a multipolygons
+// outer and inner polygons changing.
+template<class GeometryT>
+void identityHash(GeometryT& geom, char* result) {}
+
+// Specialization for MultiPolygon, the only geometry for which
+// we currently support caching calls.
+template<> inline
+void identityHash(MultiPolygon& mp, char* result) {
+	memset(result, 0, 16);
+
+	for (auto poly = mp.begin(); poly != mp.end(); poly++) {
+		MurmurHash3_x64_128(
+			&poly->outer()[0],
+			// Each point in the polygon is a pair of doubles, so 16 bytes
+			poly->outer().size() * 16,
+			(uint32_t)(*result),
+			result
+		);
+
+		for (const auto& inner: poly->inners()) {
+			MurmurHash3_x64_128(
+				&inner[0],
+				inner.size() * 16,
+				(uint32_t)(*result),
+				result
+			);
+		}
+	}
+}
+
 
 /**
 	\brief OsmLuaProcessing - converts OSM objects into OutputObjectOsmStore objects.
@@ -125,12 +202,25 @@ public:
     template<class GeometryT>
     bool CorrectGeometry(GeometryT &geom)
     {
+			char hashValue[16];
+			timespec start, end;
+			uint64_t hashDiff = 0;
+			bool wasValid = true;
+			if (cacheCorrectGeometry(geom)) {
+				clock_gettime(CLOCK_MONOTONIC, &start);
+				identityHash(geom, hashValue);
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				hashDiff = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+				clock_gettime(CLOCK_MONOTONIC, &start);
+			}
 #if BOOST_VERSION >= 105800
         geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
         if (isRelation && !geom::is_valid(geom,failure)) {
             if (verbose) std::cout << "Relation " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
+						wasValid = false;
         } else if (isWay && !geom::is_valid(geom,failure)) {
             if (verbose && failure!=22) std::cout << "Way " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
+						wasValid = false;
         }
 		
 		if (failure==boost::geometry::failure_spikes)
@@ -145,6 +235,12 @@ public:
 			}
 		}
 #endif
+		if (cacheCorrectGeometry(geom)) {
+			clock_gettime(CLOCK_MONOTONIC, &end);
+			uint64_t diff = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+
+			std::cout << "CorrectGeometry took " << (diff/1e6) << " ms wasValid= " << wasValid << " size1= " << size1(geom) << " size2= " << size2(geom) << " hash took " << (hashDiff/1e6) << " ms" << std::endl;
+		}
 		return true;
     }
 
