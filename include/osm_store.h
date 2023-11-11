@@ -79,12 +79,20 @@ class NodeStore
 
 public:
 	using element_t = std::pair<NodeID, LatpLon>;
-	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
+	using internal_element_t = std::pair<ShardedNodeID, LatpLon>;
+//	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
+	using map_t = std::deque<internal_element_t>;
 
 	void reopen()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		mLatpLons = std::make_unique<map_t>();
+		for (auto i = 0; i < mLatpLons.size(); i++)
+			mLatpLons[i]->clear();
+
+		mLatpLons.clear();
+		for (auto i = 0; i < NODE_SHARDS; i++) {
+			mLatpLons.push_back(std::make_unique<map_t>());
+		}
 	}
 
 	// @brief Lookup a latp/lon pair
@@ -92,11 +100,14 @@ public:
 	// @return Latp/lon pair
 	// @exception NotFound
 	LatpLon at(NodeID i) const {
-		auto iter = std::lower_bound(mLatpLons->begin(), mLatpLons->end(), i, [](auto const &e, auto i) { 
+		auto shard = mLatpLons[shardPart(i)];
+		auto id = idPart(i);
+
+		auto iter = std::lower_bound(shard->begin(), shard->end(), id, [](auto const &e, auto i) { 
 			return e.first < i; 
 		});
 
-		if(iter == mLatpLons->end() || iter->first != i)
+		if(iter == shard->end() || iter->first != id)
 			throw std::out_of_range("Could not find node with id " + std::to_string(i));
 
 		return iter->second;
@@ -105,36 +116,58 @@ public:
 	// @brief Return the number of stored items
 	size_t size() const { 
 		std::lock_guard<std::mutex> lock(mutex);
-		return mLatpLons->size(); 
-	}
+		uint64_t size = 0;
+		for (auto i = 0; i < mLatpLons.size(); i++)
+			size += mLatpLons[i]->size(); 
 
-	// @brief Insert a latp/lon pair.
-	// @param i OSM ID of a node
-	// @param coord a latp/lon pair to be inserted
-	// @invariant The OSM ID i must be larger than previously inserted OSM IDs of nodes
-	//			  (though unnecessarily for current impl, future impl may impose that)
-	void insert_back(NodeID i, LatpLon coord) {
-		mLatpLons->push_back(std::make_pair(i, coord));
+		return size;
 	}
 
 	void insert_back(std::vector<element_t> const &element) {
+		uint32_t newEntries[NODE_SHARDS] = {};
+		std::vector<map_t::iterator> iterators;
+
+		// Before taking the lock, do a pass to find out how much
+		// to grow each backing collection
+		for (auto it = element.begin(); it != element.end(); it++) {
+			newEntries[shardPart(it->first)]++;
+		}
+
 		std::lock_guard<std::mutex> lock(mutex);
-		auto i = mLatpLons->size();
-		mLatpLons->resize(i + element.size());
-		std::copy(element.begin(), element.end(), mLatpLons->begin() + i);
+		for (auto i = 0; i < NODE_SHARDS; i++) {
+			auto size = mLatpLons[i]->size();
+			mLatpLons[i]->resize(size + newEntries[i]);
+			iterators.push_back(mLatpLons[i]->begin() + size);
+		}
+
+		for (auto it = element.begin(); it != element.end(); it++) {
+			auto shard = shardPart(it->first);
+			auto id = idPart(it->first);
+
+			*iterators[shard] = std::make_pair(id, it->second);
+			iterators[shard]++;
+		}
 	}
 
 	// @brief Make the store empty
 	void clear() { 
-		std::lock_guard<std::mutex> lock(mutex);
-		mLatpLons->clear(); 
+		reopen();
 	}
 
 	void sort(unsigned int threadNum);
 
 private: 
 	mutable std::mutex mutex;
-	std::shared_ptr<map_t> mLatpLons;
+	std::vector<std::shared_ptr<map_t>> mLatpLons;
+
+	uint32_t shardPart(NodeID id) const {
+		uint32_t rv = id >> 32;
+		return rv;
+	}
+
+	uint32_t idPart(NodeID id) const {
+		return id;
+	}
 };
 
 class CompactNodeStore
@@ -142,7 +175,8 @@ class CompactNodeStore
 
 public:
 	using element_t = std::pair<NodeID, LatpLon>;
-	using map_t = std::deque<LatpLon, mmap_allocator<LatpLon>>;
+//	using map_t = std::deque<LatpLon, mmap_allocator<LatpLon>>;
+	using map_t = std::deque<LatpLon>;
 
 	void reopen()
 	{
@@ -210,6 +244,7 @@ public:
 		std::lock_guard<std::mutex> lock(mutex);
 		if (inited) return;
 		inited = true;
+		std::cout << "UsedWays reserving " << numNodes << " slots" << std::endl;
 		if (compact) {
 			// If we're running in compact mode, way count is roughly 1/9th of node count... say 1/8 to be safe
 			usedList.reserve(numNodes/8);
@@ -280,9 +315,11 @@ public:
 class WayStore {
 
 public:
-	using latplon_vector_t = std::vector<LatpLon, mmap_allocator<LatpLon>>;
+//	using latplon_vector_t = std::vector<LatpLon, mmap_allocator<LatpLon>>;
+	using latplon_vector_t = std::vector<LatpLon>;
 	using element_t = std::pair<WayID, latplon_vector_t>;
-	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
+//	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
+	using map_t = std::deque<element_t>;
 
 	void reopen() {
 		mLatpLonLists = std::make_unique<map_t>();
@@ -341,11 +378,13 @@ private:
 class RelationStore {
 
 public:	
-	using wayid_vector_t = std::vector<WayID, mmap_allocator<NodeID>>;
+//	using wayid_vector_t = std::vector<WayID, mmap_allocator<NodeID>>;
+	using wayid_vector_t = std::vector<WayID>;
 	using relation_entry_t = std::pair<wayid_vector_t, wayid_vector_t>;
 
 	using element_t = std::pair<WayID, relation_entry_t>;
-	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
+//	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
+	using map_t = std::deque<element_t>;
 
 	void reopen() {
 		std::lock_guard<std::mutex> lock(mutex);
@@ -424,12 +463,6 @@ public:
 	void enforce_integrity(bool ei  = true) { require_integrity = ei; }
 	bool integrity_enforced() { return require_integrity; }
 
-	void nodes_insert_back(NodeID i, LatpLon coord) {
-		if(!use_compact_nodes)
-			nodes.insert_back(i, coord);
-		else
-			compact_nodes.insert_back(i, coord);
-	}
 	void nodes_insert_back(std::vector<NodeStore::element_t> const &new_nodes) {
 		if(!use_compact_nodes)
 			nodes.insert_back(new_nodes);

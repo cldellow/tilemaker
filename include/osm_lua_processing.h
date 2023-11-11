@@ -92,7 +92,7 @@ public:
 	bool Holds(const std::string& key) const;
 
 	// Get an OSM tag for a given key (or return empty string if none)
-	std::string Find(const std::string& key) const;
+	const std::string& Find(const std::string& key) const;
 
 	// ----	Spatial queries called from Lua
 

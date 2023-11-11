@@ -31,14 +31,18 @@ protected:
 	// Store for generated geometries
 	using point_store_t = std::vector<Point>;
 
-	using linestring_t = boost::geometry::model::linestring<Point, std::vector, mmap_allocator>;
+//	using linestring_t = boost::geometry::model::linestring<Point, std::vector, mmap_allocator>;
+	using linestring_t = boost::geometry::model::linestring<Point, std::vector>;
 	using linestring_store_t = std::vector<linestring_t>;
 
-	using multi_linestring_t = boost::geometry::model::multi_linestring<linestring_t, std::vector, mmap_allocator>;
+//	using multi_linestring_t = boost::geometry::model::multi_linestring<linestring_t, std::vector, mmap_allocator>;
+	using multi_linestring_t = boost::geometry::model::multi_linestring<linestring_t, std::vector>;
 	using multi_linestring_store_t = std::vector<multi_linestring_t>;
 
-	using polygon_t = boost::geometry::model::polygon<Point, true, true, std::vector, std::vector, mmap_allocator, mmap_allocator>;
-	using multi_polygon_t = boost::geometry::model::multi_polygon<polygon_t, std::vector, mmap_allocator>;
+//	using polygon_t = boost::geometry::model::polygon<Point, true, true, std::vector, std::vector, mmap_allocator, mmap_allocator>;
+	using polygon_t = boost::geometry::model::polygon<Point, true, true, std::vector, std::vector>;
+//	using multi_polygon_t = boost::geometry::model::multi_polygon<polygon_t, std::vector, mmap_allocator>;
+	using multi_polygon_t = boost::geometry::model::multi_polygon<polygon_t, std::vector>;
 	using multi_polygon_store_t = std::vector<multi_polygon_t>;
 
 	std::mutex point_store_mutex;

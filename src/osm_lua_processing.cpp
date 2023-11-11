@@ -7,6 +7,7 @@ using namespace std;
 
 thread_local kaguya::State *g_luaState = nullptr;
 bool supportsRemappingShapefiles = false;
+std::string EMPTY_STRING = "";
 
 int lua_error_handler(int errCode, const char *errMessage)
 {
@@ -118,9 +119,9 @@ bool OsmLuaProcessing::Holds(const string& key) const {
 }
 
 // Get an OSM tag for a given key (or return empty string if none)
-string OsmLuaProcessing::Find(const string& key) const {
+const string& OsmLuaProcessing::Find(const string& key) const {
 	auto it = currentTags.find(key);
-	if(it == currentTags.end()) return "";
+	if(it == currentTags.end()) return EMPTY_STRING;
 	return it->second;
 }
 

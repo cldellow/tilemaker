@@ -40,6 +40,10 @@ typedef boost::variant<Point,Linestring,MultiLinestring,MultiPolygon> Geometry;
 typedef std::pair<Box, uint> IndexValue;
 typedef boost::geometry::index::rtree< IndexValue, boost::geometry::index::quadratic<16> > RTree;
 
+// We expect a node ID to fit in 36-bits. Rather than use 64 bits to represent this,
+// we'll use 32-bits and shard it across 16 collections.
+#define NODE_SHARDS 16
+typedef uint32_t ShardedNodeID;
 typedef uint64_t NodeID;
 typedef uint64_t WayID;
 

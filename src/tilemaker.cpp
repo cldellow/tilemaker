@@ -168,7 +168,7 @@ int main(int argc, char* argv[]) {
 	uint threadNum;
 	string outputFile;
 	string bbox;
-	bool _verbose = false, sqlite= false, mergeSqlite = false, mapsplit = false, osmStoreCompact = false, skipIntegrity = false;
+	bool _verbose = false, sqlite= false, mergeSqlite = false, mapsplit = false, osmStoreCompact = false, skipIntegrity = false, skipWriting = false;
 
 	po::options_description desc("tilemaker " STR(TM_VERSION) "\nConvert OpenStreetMap .pbf files into vector tiles\n\nAvailable options");
 	desc.add_options()
@@ -180,6 +180,7 @@ int main(int argc, char* argv[]) {
 		("config", po::value< string >(&jsonFile)->default_value("config.json"), "config JSON file")
 		("process",po::value< string >(&luaFile)->default_value("process.lua"),  "tag-processing Lua file")
 		("store",  po::value< string >(&osmStoreFile),  "temporary storage for node/ways/relations data")
+		("skip-writing",po::bool_switch(&skipWriting),  "Don't actually emit the mbtiles (useful for profiling initial stages)")
 		("compact",po::bool_switch(&osmStoreCompact),  "Reduce overall memory usage (compact mode).\nNOTE: This requires the input to be renumbered (osmium renumber)")
 		("verbose",po::bool_switch(&_verbose),                                   "verbose error output")
 		("skip-integrity",po::bool_switch(&skipIntegrity),                       "don't enforce way/node integrity")
@@ -213,7 +214,7 @@ int main(int argc, char* argv[]) {
 
 	// ---- Remove existing .mbtiles if it exists
 
-	if (sqlite && !mergeSqlite && static_cast<bool>(std::ifstream(outputFile))) {
+	if (!skipWriting && sqlite && !mergeSqlite && static_cast<bool>(std::ifstream(outputFile))) {
 		cout << "mbtiles file exists, will overwrite (Ctrl-C to abort, rerun with --merge to keep)" << endl;
 		std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 		if (remove(outputFile.c_str()) != 0) {
@@ -345,6 +346,7 @@ int main(int argc, char* argv[]) {
 		attributeStore.doneReading();
 		osmMemTiles.reportSize();
 		attributeStore.reportSize();
+		osmStore.reportSize();
 		void_mmap_allocator::shutdown(); // this clears the mmap'ed nodes/ways/relations (quickly!)
 	}
 
@@ -358,7 +360,7 @@ int main(int argc, char* argv[]) {
 
 	// ----	Initialise mbtiles if required
 	
-	if (sharedData.sqlite) {
+	if (!skipWriting && sharedData.sqlite) {
 		sharedData.mbtiles.openForWriting(&sharedData.outputFile);
 		sharedData.mbtiles.writeMetadata("name",sharedData.config.projectName);
 		sharedData.mbtiles.writeMetadata("type","baselayer");
@@ -428,6 +430,11 @@ int main(int argc, char* argv[]) {
 			if (ret != 0) return ret;
 
 			tileList.pop_back();
+		}
+
+		if (skipWriting) {
+			cout << "--skip-writing was present; not writing anything" << endl;
+			return 0;
 		}
 
 		// Launch the pool with threadNum threads

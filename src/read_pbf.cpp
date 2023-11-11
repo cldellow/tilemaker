@@ -106,6 +106,7 @@ bool PbfReader::ReadWays(OsmLuaProcessing &output, PrimitiveGroup &pg, Primitive
 
 				// If we need it for later, store the way's coordinates in the global way store
 				if (osmStore.way_is_used(wayId)) {
+//					std::cout << "storing way of size " << llVec.size() << std::endl;
 					ways.push_back(std::make_pair(wayId, WayStore::latplon_vector_t(llVec.begin(), llVec.end())));
 				}
 				output.setWay(static_cast<WayID>(pbfWay.id()), llVec, tags);
