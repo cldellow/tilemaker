@@ -35,4 +35,11 @@ std::string compress_string(const std::string& str,
 
 std::string boost_validity_error(unsigned failure);
 
+struct string_ptr_less_than {
+	bool operator()(const std::string* lhs, const std::string* rhs) const {            
+		return *lhs < *rhs;
+	}
+}; 
+
+
 #endif //_HELPERS_H

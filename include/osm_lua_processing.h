@@ -66,7 +66,7 @@ public:
 
 	// ----	Data loading methods
 
-	using tag_map_t = boost::container::flat_map<std::string, std::string>;
+	using tag_map_t = boost::container::flat_map<const std::string*, const std::string*, string_ptr_less_than>;
 
 	// Scan non-MP relation
 	bool scanRelation(WayID id, const tag_map_t &tags);
@@ -247,7 +247,7 @@ private:
 	class LayerDefinition &layers;
 	
 	OutputObjectsWithAttributes outputs;		// All output objects that have been created
-	const boost::container::flat_map<std::string, std::string>* currentTags;
+	const tag_map_t* currentTags;
 
 	std::vector<OutputObjectRef> OutputsAsOORefs() {
 		std::vector<OutputObjectRef> list;

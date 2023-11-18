@@ -10,16 +10,11 @@
 #include <boost/functional/hash.hpp>
 #include <boost/container/flat_map.hpp>
 #include <vector>
+#include "helpers.h"
 
 /* AttributeStore - global dictionary for attributes */
 
 typedef uint32_t AttributeIndex; // check this is enough
-
-struct string_ptr_less_than {
-	bool operator()(const std::string* lhs, const std::string* rhs) const {            
-		return *lhs < *rhs;
-	}
-}; 
 
 class AttributeKeyStore {
 public:

@@ -4,6 +4,7 @@
 
 #include "geom.h"
 #include "coordinates.h"
+#include "helpers.h"
 
 #include <utility>
 #include <vector>
@@ -274,9 +275,10 @@ public:
 class RelationScanStore {
 
 private:
-	using tag_map_t = boost::container::flat_map<std::string, std::string>;
+	using tag_map_t = boost::container::flat_map<const std::string*, const std::string*, string_ptr_less_than>;
+	using long_lived_tag_map_t = boost::container::flat_map<std::string, std::string>;
 	std::map<WayID, std::vector<WayID>> relationsForWays;
-	std::map<WayID, tag_map_t> relationTags;
+	std::map<WayID, long_lived_tag_map_t> relationTags;
 	mutable std::mutex mutex;
 
 public:
@@ -284,7 +286,7 @@ public:
 		std::lock_guard<std::mutex> lock(mutex);
 		relationsForWays[wayid].emplace_back(relid);
 	}
-	void store_relation_tags(WayID relid, const tag_map_t &tags) {
+	void store_relation_tags(WayID relid, const long_lived_tag_map_t &tags) {
 		std::lock_guard<std::mutex> lock(mutex);
 		relationTags[relid] = tags;
 	}
