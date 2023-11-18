@@ -64,7 +64,7 @@ std::string compress_string(const std::string& str,
 }
 
 // Decompress an STL string using zlib and return the original data.
-std::string decompress_string(const std::string& str, bool asGzip) {
+size_t decompress_string(std::vector<char>& output, const std::string& input, bool asGzip) {
     z_stream zs;                        // z_stream is zlib's control structure
     memset(&zs, 0, sizeof(zs));
 
@@ -76,27 +76,30 @@ std::string decompress_string(const std::string& str, bool asGzip) {
 			throw(std::runtime_error("inflateInit failed while decompressing."));
 	}
 
-    zs.next_in = (Bytef*)str.data();
-    zs.avail_in = str.size();
+    zs.next_in = (Bytef*)input.data();
+    zs.avail_in = input.size();
 
     int ret;
-    char outbuffer[32768];
-    std::string outstring;
 
+    int iterations = 0;
     // get the decompressed bytes blockwise using repeated calls to inflate
     do {
-        zs.next_out = reinterpret_cast<Bytef*>(outbuffer);
-        zs.avail_out = sizeof(outbuffer);
+        size_t avail_out = output.size() - zs.total_out;
 
-        ret = inflate(&zs, 0);
-
-        if (outstring.size() < zs.total_out) {
-            outstring.append(outbuffer,
-                             zs.total_out - outstring.size());
+        if (avail_out < 32768) {
+            //std::cout << "allocating more buffer space, capacity=" << output.size() << std::endl;
+            output.resize(output.size() + 32768);
         }
 
-    } while (ret == Z_OK);
+        zs.next_out = reinterpret_cast<Bytef*>(&output[0] + zs.total_out);
+        zs.avail_out = output.size() - zs.total_out;
 
+        ret = inflate(&zs, 0);
+        iterations++;
+    } while (ret == Z_OK);
+    size_t size = zs.total_out;
+
+//    std::cout << iterations << " iterations to inflate" << std::endl;
     inflateEnd(&zs);
 
     if (ret != Z_STREAM_END) {          // an error occurred that was not EOF
@@ -105,8 +108,7 @@ std::string decompress_string(const std::string& str, bool asGzip) {
             << zs.msg;
         throw(std::runtime_error(oss.str()));
     }
-
-    return outstring;
+    return size;
 }
 
 // Parse a Boost error

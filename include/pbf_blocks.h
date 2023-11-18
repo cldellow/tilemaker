@@ -16,12 +16,12 @@
    ------------------- */
 
 // Read and parse a protobuf message
-void readMessage(google::protobuf::Message *message, std::istream &input, unsigned int size);
+void readMessage(std::vector<char>& buffer, google::protobuf::Message *message, std::istream &input, unsigned int size);
 
 // Read an osm.pbf sequence of header length -> BlobHeader -> Blob
 // and parse the unzipped contents into a message
 BlobHeader readHeader(std::istream &input);
-void readBlock(google::protobuf::Message *messagePtr, std::size_t datasize, std::istream &input);
+void readBlock(std::vector<char>& buffer, google::protobuf::Message *messagePtr, std::size_t datasize, std::istream &input);
 
 void writeBlock(google::protobuf::Message *messagePtr, std::ostream &output, std::string headerType);
 /* -------------------

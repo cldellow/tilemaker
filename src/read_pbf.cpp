@@ -207,11 +207,11 @@ bool PbfReader::ReadRelations(OsmLuaProcessing &output, PrimitiveGroup &pg, Prim
 }
 
 // Returns true when block was completely handled, thus could be omited by another phases.
-bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::pair<std::size_t, std::size_t> progress, std::size_t datasize, 
+bool PbfReader::ReadBlock(std::vector<char>& buffer, std::istream &infile, OsmLuaProcessing &output, std::pair<std::size_t, std::size_t> progress, std::size_t datasize, 
                           unordered_set<string> const &nodeKeys, bool locationsOnWays, ReadPhase phase) 
 {
 	PrimitiveBlock pb;
-	readBlock(&pb, datasize, infile);
+	readBlock(buffer, &pb, datasize, infile);
 	if (infile.eof()) {
 		return true;
 	}
@@ -300,7 +300,8 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 	osmStore.clear();
 
 	HeaderBlock block;
-	readBlock(&block, readHeader(*infile).datasize(), *infile);
+	std::vector<char> buffer;
+	readBlock(buffer, &block, readHeader(*infile).datasize(), *infile);
 	bool locationsOnWays = false;
 	for (std::string option : block.optional_features()) {
 		if (option=="LocationsOnWays") {
@@ -336,11 +337,13 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 			const std::lock_guard<std::mutex> lock(block_mutex);
 			for(auto const &block: blocks) {
 				boost::asio::post(pool, [=, progress=std::make_pair(block.first, total_blocks), block=block.second, &blocks, &block_mutex, &nodeKeys]() {
+					thread_local std::vector<char> buffer;
+					buffer.reserve(1 << 16);
 					auto infile = generate_stream();
 					auto output = generate_output();
 
 					infile->seekg(block.first);
-					if(ReadBlock(*infile, *output, progress, block.second, nodeKeys, locationsOnWays, phase)) {
+					if(ReadBlock(buffer, *infile, *output, progress, block.second, nodeKeys, locationsOnWays, phase)) {
 						const std::lock_guard<std::mutex> lock(block_mutex);
 						blocks.erase(progress.first);	
 					}
@@ -383,7 +386,8 @@ int ReadPbfBoundingBox(const std::string &inputFile, double &minLon, double &max
 	fstream infile(inputFile, ios::in | ios::binary);
 	if (!infile) { cerr << "Couldn't open .pbf file " << inputFile << endl; return -1; }
 	HeaderBlock block;
-	readBlock(&block, readHeader(infile).datasize(), infile);
+	std::vector<char> buffer;
+	readBlock(buffer, &block, readHeader(infile).datasize(), infile);
 	if (block.has_bbox()) {
 		hasClippingBox = true;		
 		minLon = block.bbox().left()  /1000000000.0;

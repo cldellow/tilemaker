@@ -8,8 +8,9 @@ using namespace std;
    ------------------- */
 
 // Read and parse a protobuf message
-void readMessage(google::protobuf::Message *message, istream &input, unsigned int size) {
-	vector<char> buffer(size);
+void readMessage(std::vector<char>& buffer, google::protobuf::Message *message, istream &input, unsigned int size) {
+	buffer.reserve(size);
+//	vector<char> buffer(size);
 	input.read(&buffer.front(), size);
 	message->ParseFromArray(&buffer.front(), size);
 }
@@ -25,20 +26,34 @@ BlobHeader readHeader(istream &input) {
 	endian_swap(size);
 
 	// get BlobHeader and parse
-	readMessage(&bh, input, size);
+	std::vector<char> buffer;
+	readMessage(buffer, &bh, input, size);
 	return bh;
 }
 
-void readBlock(google::protobuf::Message *messagePtr, std::size_t datasize, istream &input) {
+void readBlock(std::vector<char>& buffer, google::protobuf::Message *messagePtr, std::size_t datasize, istream &input) {
 	if (input.eof()) { return ; }
+	timespec start, end;
 
+//	clock_gettime(CLOCK_MONOTONIC, &start);
 	// get Blob and parse
 	Blob blob;
-	readMessage(&blob, input, datasize);
+	readMessage(buffer, &blob, input, datasize);
+	/*
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	{
+		uint64_t ns = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+		std::cout << "fetch " << blob.zlib_data().size() << " bytes took " << (ns/1e6) << " ms" << std::endl;
+	}
+	*/
 
+//	start = end;
 	// Unzip the gzipped content
-	string contents = decompress_string(blob.zlib_data(), false);
-	messagePtr->ParseFromString(contents);
+	size_t size = decompress_string(buffer, blob.zlib_data(), false);
+//	clock_gettime(CLOCK_MONOTONIC, &end);
+//	uint64_t ns = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+//	std::cout << "decompress " << blob.zlib_data().size() << " bytes to " << size << " bytes took " << (ns/1e6) << " ms" << std::endl;
+	messagePtr->ParseFromArray(&buffer[0], size);
 }
 
 void writeBlock(google::protobuf::Message *messagePtr, ostream &output, string headerType) {

@@ -27,7 +27,7 @@ inline std::vector<std::string> split_string(std::string &inputStr, char sep) {
 	return res;
 }
 
-std::string decompress_string(const std::string& str, bool asGzip = false);
+size_t decompress_string(std::vector<char>& output, const std::string& input, bool asGzip = false);
 
 std::string compress_string(const std::string& str,
                             int compressionlevel = Z_DEFAULT_COMPRESSION,
