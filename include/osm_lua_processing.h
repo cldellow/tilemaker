@@ -29,6 +29,54 @@ extern "C" {
 // FIXME: why is this global ?
 extern bool verbose;
 
+class LazyLatpLonVec {
+public:
+	LazyLatpLonVec(bool locationsOnWays, Way &pbfWay, OSMStore &osmStore):
+		inited(false),
+		locationsOnWays(locationsOnWays),
+		pbfWay(pbfWay),
+		osmStore(osmStore)
+	{
+	}
+	void ensurePopulated() {
+		if (inited)
+			return;
+
+		inited = true;
+		if (locationsOnWays) {
+			int lat=0, lon=0;
+			for (int k=0; k<pbfWay.lats_size(); k++) {
+				lat += pbfWay.lats(k);
+				lon += pbfWay.lons(k);
+				LatpLon ll = { int(lat2latp(double(lat)/10000000.0)*10000000.0), lon };
+				llVec.push_back(ll);
+			}
+		} else {
+			int64_t nodeId = 0;
+			for (int k=0; k<pbfWay.refs_size(); k++) {
+				nodeId += pbfWay.refs(k);
+				try {
+					llVec.push_back(osmStore.nodes_at(static_cast<NodeID>(nodeId)));
+				} catch (std::out_of_range &err) {
+					if (osmStore.integrity_enforced()) throw err;
+				}
+			}
+		}
+	}
+
+	LatpLonVec* getLlVec() {
+		ensurePopulated();
+		return &llVec;
+	}
+private:
+	bool inited;
+	bool locationsOnWays;
+	LatpLonVec llVec;
+	Way &pbfWay;
+	OSMStore &osmStore;
+};
+
+
 /**
 	\brief OsmLuaProcessing - converts OSM objects into OutputObjectOsmStore objects.
 	
@@ -75,7 +123,8 @@ public:
 	void setNode(NodeID id, LatpLon node, const tag_map_t &tags);
 
 	/// \brief We are now processing a way
-	void setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags);
+	//void setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags);
+	void setWay(WayID wayId, LazyLatpLonVec &llVec, const tag_map_t &tags);
 
 	/** \brief We are now processing a relation
 	 * (note that we store relations as ways with artificial IDs, and that
@@ -225,14 +274,17 @@ private:
 
 	uint64_t osmID;							///< ID of OSM object (relations have decrementing way IDs)
 	int64_t originalOsmID;					///< Original OSM object ID
-	bool isWay, isRelation, isClosed;		///< Way, node, relation?
+	bool isWay, isRelation, relationIsClosed;		///< Way, node, relation?
+
+	// TODO: we can probably remove this
+	bool isClosed;
 
 	bool relationAccepted;					// in scanRelation, whether we're using a non-MP relation
 	std::vector<WayID> relationList;		// in processWay, list of relations this way is in
 	int relationSubscript = -1;				// in processWay, position in the relation list
 
 	int32_t lon,latp;						///< Node coordinates
-	LatpLonVec const *llVecPtr;
+	LazyLatpLonVec *llVecPtr;
 	WayVec const *outerWayVecPtr;
 	WayVec const *innerWayVecPtr;
 

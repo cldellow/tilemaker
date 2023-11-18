@@ -2,6 +2,8 @@
 #include "read_pbf.h"
 #include "pbf_blocks.h"
 
+#include <thread>
+#include <chrono>
 #include <boost/interprocess/streams/bufferstream.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/post.hpp>
@@ -77,28 +79,10 @@ bool PbfReader::ReadWays(OsmLuaProcessing &output, PrimitiveGroup &pg, Primitive
 			WayID wayId = static_cast<WayID>(pbfWay.id());
 			if (wayId > OSMID_MASK) throw std::runtime_error("Way ID negative or too large: "+std::to_string(wayId));
 
-			// Assemble nodelist
-			LatpLonVec llVec;
-			if (locationsOnWays) {
-				int lat=0, lon=0;
-				for (int k=0; k<pbfWay.lats_size(); k++) {
-					lat += pbfWay.lats(k);
-					lon += pbfWay.lons(k);
-					LatpLon ll = { int(lat2latp(double(lat)/10000000.0)*10000000.0), lon };
-					llVec.push_back(ll);
-				}
-			} else {
-				int64_t nodeId = 0;
-				for (int k=0; k<pbfWay.refs_size(); k++) {
-					nodeId += pbfWay.refs(k);
-					try {
-						llVec.push_back(osmStore.nodes_at(static_cast<NodeID>(nodeId)));
-					} catch (std::out_of_range &err) {
-						if (osmStore.integrity_enforced()) throw err;
-					}
-				}
-			}
-			if (llVec.empty()) continue;
+			LazyLatpLonVec llVec(locationsOnWays, pbfWay, osmStore);
+
+			// TODO: re-enable short-circuiting if llVec would be empty
+			//if (llVec.empty()) continue;
 
 			try {
 				tag_map_t tags;
@@ -106,7 +90,7 @@ bool PbfReader::ReadWays(OsmLuaProcessing &output, PrimitiveGroup &pg, Primitive
 
 				// If we need it for later, store the way's coordinates in the global way store
 				if (osmStore.way_is_used(wayId)) {
-					ways.push_back(std::make_pair(wayId, WayStore::latplon_vector_t(llVec.begin(), llVec.end())));
+					ways.push_back(std::make_pair(wayId, WayStore::latplon_vector_t(llVec.getLlVec()->begin(), llVec.getLlVec()->end())));
 				}
 				output.setWay(static_cast<WayID>(pbfWay.id()), llVec, tags);
 
@@ -289,6 +273,9 @@ bool PbfReader::ReadBlock(std::istream &infile, OsmLuaProcessing &output, std::p
 	return true;
 }
 
+#define PHASE_START_DELAY 0
+#define PHASE_END_DELAY 0
+
 int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int threadNum, 
 		pbfreader_generate_stream const &generate_stream, pbfreader_generate_output const &generate_output)
 {
@@ -327,6 +314,25 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 
 	std::vector<ReadPhase> all_phases = { ReadPhase::Nodes, ReadPhase::RelationScan, ReadPhase::Ways, ReadPhase::Relations };
 	for(auto phase: all_phases) {
+		if(phase == ReadPhase::Nodes) {
+			std::cout << "Starting ReadPhase::Nodes (1)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_START_DELAY));
+		}
+		if(phase == ReadPhase::RelationScan) {
+			std::cout << "Starting ReadPhase::RelationScan (2)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_START_DELAY));
+		}
+
+		if(phase == ReadPhase::Ways) {
+			std::cout << "Starting ReadPhase::Ways (3)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_START_DELAY));
+		}
+		if(phase == ReadPhase::Relations) {
+			std::cout << "Starting ReadPhase::Relations (4)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_START_DELAY));
+		}
+
+
 		// Launch the pool with threadNum threads
 		boost::asio::thread_pool pool(threadNum);
 
@@ -350,10 +356,26 @@ int PbfReader::ReadPbfFile(unordered_set<string> const &nodeKeys, unsigned int t
 
 		if(phase == ReadPhase::Nodes) {
 			osmStore.nodes_sort(threadNum);
+
+			std::cout << "Done ReadPhase::Nodes (1)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_END_DELAY));
+//			exit(1);
 		}
+		if(phase == ReadPhase::RelationScan) {
+			std::cout << "Done ReadPhase::RelationScan (2)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_END_DELAY));
+		}
+
 		if(phase == ReadPhase::Ways) {
 			osmStore.ways_sort(threadNum);
+			std::cout << "Done ReadPhase::Ways (3)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_END_DELAY));
 		}
+		if(phase == ReadPhase::Relations) {
+			std::cout << "Done ReadPhase::Relations (4)" << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(PHASE_END_DELAY));
+		}
+
 	}
 
 	// ---- Sort the generated geometries

@@ -92,6 +92,7 @@ public:
 	// @return Latp/lon pair
 	// @exception NotFound
 	LatpLon at(NodeID i) const {
+//		std::cout << std::endl << "nodeAt " << i << std::endl;
 		auto iter = std::lower_bound(mLatpLons->begin(), mLatpLons->end(), i, [](auto const &e, auto i) { 
 			return e.first < i; 
 		});
