@@ -1,9 +1,12 @@
-#pragma once
-#include<string>
-#include<functional>
-#include<stdexcept>
-#include<iostream>
-#include"sqlite3.h"
+#ifndef _SQLITE_MODERN_CPP_H
+#define _SQLITE_MODERN_CPP_H
+
+#include <string>
+#include <functional>
+#include <vector>
+#include <stdexcept>
+#include <iostream>
+#include "sqlite3.h"
 
 /*
 	This is an earlier version of sqlite_modern_cpp (current versions break on OS X), lightly patched
@@ -235,14 +238,14 @@ namespace sqlite {
 
 		database() {};
 		
-		void init(std::string const & db_name) {
+		void init(std::string const & db_name, int mode = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) {
 			_db = nullptr;
 			_ownes_db = false;
-			_connected = sqlite3_open(db_name.data(), &_db) == SQLITE_OK;
+			_connected = sqlite3_open_v2(db_name.data(), &_db, mode, nullptr) == SQLITE_OK;
 		}
 		
-		database(std::string const & db_name) : _db(nullptr), _connected(false), _ownes_db(true) {
-			_connected = sqlite3_open(db_name.data(), &_db) == SQLITE_OK;
+		database(std::string const & db_name, int mode = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) : _db(nullptr), _connected(false), _ownes_db(true) {
+			_connected = sqlite3_open_v2(db_name.data(), &_db, mode, nullptr) == SQLITE_OK;
 		}
 
 		database(sqlite3* db) {
@@ -549,3 +552,4 @@ namespace sqlite {
 #pragma endregion
 
 }
+#endif

@@ -14,6 +14,8 @@
 #include "osm_mem_tiles.h"
 #include "attribute_store.h"
 #include "helpers.h"
+#include "function_cache.h"
+#include "murmur_hash_3.h"
 
 #include <boost/container/flat_map.hpp>
 
@@ -29,6 +31,105 @@ extern "C" {
 // FIXME: why is this global ?
 extern bool verbose;
 
+class FunctionCache;
+
+// Whether or not we should cache the result of is_valid for the given
+// geometry.
+template<class GeometryT> bool shouldCacheIsValid(GeometryT& geom) { return false; }
+// We don't seem to generate very many of these, don't bother caching them
+template<> inline bool shouldCacheIsValid(Polygon& poly) { return false; }
+template<> inline bool shouldCacheIsValid(MultiLinestring& mls) { return false; }
+
+template<> inline bool shouldCacheIsValid(MultiPolygon& mp) {
+	uint32_t rv = 0;
+	for (auto poly = mp.begin(); poly != mp.end(); poly++) {
+		rv += poly->outer().size();
+		for (const auto& inner: poly->inners()) {
+			rv += inner.size();
+		}
+	}
+	
+	// This is somewhat arbitrarily chosen. In NS, ~3% of polygons
+	// meet this threshold, taking 75% of is_valid time.
+	return rv >= 50;
+}
+template<> inline bool shouldCacheIsValid(Linestring& ls) {
+	// TODO: get good baseline on complexity/duration in order
+	//   to pick a threshold
+	return ls.size() > 50;
+}
+
+template<class GeometryT> uint32_t getGeomType(GeometryT& geom) { return 0; }
+template<> inline uint32_t getGeomType(MultiPolygon& mp) { return 1; }
+template<> inline uint32_t getGeomType(Polygon& poly) { return 2; }
+template<> inline uint32_t getGeomType(Linestring& ls) { return 3; }
+template<> inline uint32_t getGeomType(MultiLinestring& mls) { return 4; }
+
+
+/*
+// Temporary functions to help me understand if size correlates with cost
+// of is_valid
+template<class GeometryT>
+uint32_t size1(GeometryT& geom) { return 0; }
+
+template<> inline
+uint32_t size1(MultiPolygon& mp) {
+	uint32_t rv = 0;
+	for (auto poly = mp.begin(); poly != mp.end(); poly++) {
+		rv++;
+		rv += poly->inners().size();
+	}
+	return rv;
+}
+
+template<class GeometryT>
+uint32_t size2(GeometryT& geom) { return 0; }
+
+template<> inline
+uint32_t size2(MultiPolygon& mp) {
+	uint32_t rv = 0;
+	for (auto poly = mp.begin(); poly != mp.end(); poly++) {
+		rv += poly->outer().size();
+		for (const auto& inner: poly->inners()) {
+			rv += inner.size();
+		}
+	}
+	return rv;
+}
+*/
+
+
+// Template function to return a hash value for a geometry. The value
+// should change if the identity of the geometry has changed, e.g.
+// a node's point values, a way's points values, a multipolygons
+// outer and inner polygons changing.
+template<class GeometryT> void identityHash(GeometryT& geom, char* result) {}
+
+// Specialization for MultiPolygon, the only geometry for which
+// we currently support caching calls.
+template<> inline void identityHash(MultiPolygon& mp, char* result) {
+	memset(result, 0, 16);
+
+	for (auto poly = mp.begin(); poly != mp.end(); poly++) {
+		MurmurHash3_x64_128(
+			&poly->outer()[0],
+			// Each point in the polygon is a pair of doubles, so 16 bytes
+			poly->outer().size() * 16,
+			(uint32_t)(*result),
+			result
+		);
+
+		for (const auto& inner: poly->inners()) {
+			MurmurHash3_x64_128(
+				&inner[0],
+				inner.size() * 16,
+				(uint32_t)(*result),
+				result
+			);
+		}
+	}
+}
+
 /**
 	\brief OsmLuaProcessing - converts OSM objects into OutputObjects.
 	
@@ -42,12 +143,15 @@ public:
 	// ----	initialization routines
 
 	OsmLuaProcessing(
-        OSMStore &osmStore,
-        const class Config &configIn, class LayerDefinition &layers, 
+		OSMStore &osmStore,
+		const class Config &configIn,
+		class LayerDefinition &layers, 
 		const std::string &luaFile,
 		const class ShpMemTiles &shpMemTiles, 
 		class OsmMemTiles &osmMemTiles,
-		AttributeStore &attributeStore);
+		AttributeStore &attributeStore,
+		FunctionCache* functionCache
+	);
 	~OsmLuaProcessing();
 
 	// ----	Helpers provided for main routine
@@ -122,20 +226,77 @@ public:
 	Point calculateCentroid();
 
 	// ----	Requests from Lua to write this way/node to a vector tile's Layer
-    template<class GeometryT>
-    bool CorrectGeometry(GeometryT &geom)
-    {
+	template<class GeometryT>
+	bool CorrectGeometry(GeometryT &geom)
+	{
 #if BOOST_VERSION >= 105800
-        geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
-        if (isRelation && !geom::is_valid(geom,failure)) {
-            if (verbose) std::cout << "Relation " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
-        } else if (isWay && !geom::is_valid(geom,failure)) {
-            if (verbose && failure!=22) std::cout << "Way " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
-        }
-		
+		geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
+		if (isRelation || isWay) {
+			bool useFunctionCache = functionCache != NULL && shouldCacheIsValid(geom);
+//			useFunctionCache = false;
+			std::pair<bool, int64_t> cachedIsValid = std::pair<bool, int64_t>(false, 0);
+			bool wasInCache = false;
+			bool isValid = false;
+
+			int64_t keys[3];
+			// NB: technically it's wrong for us to force the OSM ID into a signed int,
+			//     but it'll never overflow
+			keys[0] = originalOsmID;
+			keys[1] = keys[2] = 0;
+			if (useFunctionCache) {
+				// Use osm ID + hash of the geometry to look up cached result.
+				hashInvokes++;
+				//identityHash(geom, (char*)&keys[1]);
+
+				cachedIsValid = functionCache->getCachedInt64(keys[0], keys[1], keys[2], FunctionCache::Function::IsValid);
+
+				wasInCache = cachedIsValid.first;
+				if (wasInCache) {
+					cachedEntries++;
+					deserializeIsValid(cachedIsValid.second, isValid, failure);
+
+					if (isValid) {
+						cacheSkips++;
+						return true;
+					}
+				}
+			}
+
+			if (!wasInCache) {
+				timespec start, end;
+				clock_gettime(CLOCK_MONOTONIC, &start);
+				isValid = geom::is_valid(geom, failure);
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				uint64_t elapsedNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+				geomTypeMs[getGeomType(geom)] += elapsedNs / 1e6;
+				if (isWay) {
+					wayMs += elapsedNs / 1e6;
+				}
+				if (isRelation) {
+					relationMs += elapsedNs / 1e6;
+				}
+
+				if (useFunctionCache) {
+					functionCache->addCachedInt64(keys[0], keys[1], keys[2], FunctionCache::Function::IsValid, serializeIsValid(isValid, failure));
+					const auto find = functionCache->getCachedInt64(keys[0], keys[1], keys[2], FunctionCache::Function::IsValid);
+					if (!find.first) {
+						std::cout << "failed to roundtrip key " << keys[0] << " " << keys[1] << " " << keys[2] << std::endl;
+					}
+				}
+			}
+
+			if (!isValid && verbose) {
+				if (isRelation) {
+					std::cout << "Relation " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
+				} else if (isWay && failure != 22) {
+					std::cout << "Way " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
+				}
+			}
+		}
+
 		if (failure==boost::geometry::failure_spikes)
 			geom::remove_spikes(geom);
-        if (failure == boost::geometry::failure_few_points) 
+		if (failure == boost::geometry::failure_few_points) 
 			return false;
 		if (failure) {
 			std::time_t start = std::time(0);
@@ -146,7 +307,7 @@ public:
 		}
 #endif
 		return true;
-    }
+	}
 
 	// Add layer
 	void Layer(const std::string &layerName, bool area);
@@ -221,6 +382,7 @@ private:
 	const class ShpMemTiles &shpMemTiles;
 	class OsmMemTiles &osmMemTiles;
 	AttributeStore &attributeStore;			// key/value store
+	FunctionCache* functionCache; // optional function cache
 
 	int64_t originalOsmID;					///< Original OSM object ID
 	bool isWay, isRelation, isClosed;		///< Way, node, relation?
@@ -257,6 +419,24 @@ private:
 		}
 		return list;
 	}
+
+	void deserializeIsValid(int64_t value, bool& isValid, geom::validity_failure_type& failure) {
+		isValid = (bool)(value >> 16);
+		failure = static_cast<geom::validity_failure_type>(0x00000000000000FF & value);
+	}
+
+	int64_t serializeIsValid(bool isValid, geom::validity_failure_type failure) {
+		return isValid << 16 | failure;
+	}
+
+
+	uint64_t hashInvokes;
+	uint64_t cachedEntries;
+	uint64_t cacheSkips;
+	double wayMs;
+	double relationMs;
+	std::map<uint32_t, double> geomTypeMs;
+
 };
 
 #endif //_OSM_LUA_PROCESSING_H

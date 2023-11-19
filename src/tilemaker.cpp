@@ -42,6 +42,7 @@
 #include "output_object.h"
 #include "osm_lua_processing.h"
 #include "mbtiles.h"
+#include "function_cache.h"
 #include "write_geometry.h"
 
 #include "shared_data.h"
@@ -159,7 +160,6 @@ vector<string> parseBox(const string& bbox) {
  * Worker threads write the output tiles, and start in the outputProc function.
  */
 int main(int argc, char* argv[]) {
-
 	// ----	Read command-line options
 	vector<string> inputFiles;
 	string luaFile;
@@ -294,7 +294,7 @@ int main(int argc, char* argv[]) {
 	shpMemTiles.open();
 
 	OsmLuaProcessing osmLuaProcessing(osmStore, config, layers, luaFile, 
-		shpMemTiles, osmMemTiles, attributeStore);
+		shpMemTiles, osmMemTiles, attributeStore, NULL);
 
 	// ---- Load external shp files
 
@@ -339,7 +339,9 @@ int main(int argc, char* argv[]) {
 					return pbfStream;
 				},
 				[&]() {
-					thread_local std::shared_ptr<OsmLuaProcessing> osmLuaProcessing(new OsmLuaProcessing(osmStore, config, layers, luaFile, shpMemTiles, osmMemTiles, attributeStore));
+					thread_local std::shared_ptr<FunctionCache> functionCache(new FunctionCache("/tmp/function-cache.db"));
+
+					thread_local std::shared_ptr<OsmLuaProcessing> osmLuaProcessing(new OsmLuaProcessing(osmStore, config, layers, luaFile, shpMemTiles, osmMemTiles, attributeStore, functionCache.get()));
 					return osmLuaProcessing;
 				});	
 			if (ret != 0) return ret;
@@ -392,6 +394,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	// ----	Write out data
+	return 0; //TODO
 
 	// If mapsplit, read list of tiles available
 	unsigned runs=1;
@@ -425,7 +428,9 @@ int main(int argc, char* argv[]) {
 					return make_unique<boost::interprocess::bufferstream>(pbf.data(), pbf.size(),  ios::in | ios::binary);
 				},
 				[&]() {
-					return std::make_unique<OsmLuaProcessing>(osmStore, config, layers, luaFile, shpMemTiles, osmMemTiles, attributeStore);
+					thread_local std::shared_ptr<FunctionCache> functionCache(new FunctionCache("/tmp/function-cache.db"));
+
+					return std::make_unique<OsmLuaProcessing>(osmStore, config, layers, luaFile, shpMemTiles, osmMemTiles, attributeStore, functionCache.get());
 				});	
 			if (ret != 0) return ret;
 

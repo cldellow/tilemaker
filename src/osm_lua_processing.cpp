@@ -1,6 +1,7 @@
 #include "osm_lua_processing.h"
 #include "helpers.h"
 #include <iostream>
+#include "function_cache.h"
 
 
 using namespace std;
@@ -8,6 +9,7 @@ using namespace std;
 thread_local kaguya::State *g_luaState = nullptr;
 bool supportsRemappingShapefiles = false;
 const std::string EMPTY_STRING = "";
+std::mutex timeGuard;
 
 int lua_error_handler(int errCode, const char *errMessage)
 {
@@ -20,19 +22,28 @@ int lua_error_handler(int errCode, const char *errMessage)
 // ----	initialization routines
 
 OsmLuaProcessing::OsmLuaProcessing(
-    OSMStore &osmStore,
-    const class Config &configIn, class LayerDefinition &layers,
+	OSMStore &osmStore,
+	const class Config &configIn,
+	class LayerDefinition &layers,
 	const string &luaFile,
 	const class ShpMemTiles &shpMemTiles, 
 	class OsmMemTiles &osmMemTiles,
-	AttributeStore &attributeStore):
+	AttributeStore &attributeStore,
+	FunctionCache* functionCache
+):
 	osmStore(osmStore),
 	shpMemTiles(shpMemTiles),
 	osmMemTiles(osmMemTiles),
 	attributeStore(attributeStore),
 	config(configIn),
 	currentTags(NULL),
-	layers(layers) {
+	layers(layers),
+	hashInvokes(0),
+	cachedEntries(0),
+	cacheSkips(0),
+	wayMs(0),
+	relationMs(0),
+	functionCache(functionCache) {
 
 	// ----	Initialise Lua
 	g_luaState = &luaState;
@@ -77,6 +88,12 @@ OsmLuaProcessing::OsmLuaProcessing(
 OsmLuaProcessing::~OsmLuaProcessing() {
 	// Call exit_function of Lua logic
 	luaState("if exit_function~=nil then exit_function() end");
+
+	std::lock_guard<std::mutex> lock(timeGuard);
+	std::cerr << "hashed " << hashInvokes << ", found " << cachedEntries << ", skipped " << cacheSkips << " calcs, ways took " << wayMs << " ms, relations took " << relationMs << " ms" << std::endl << std::flush;
+	for (const auto& it: geomTypeMs) {
+		std::cout << "geomType=" << it.first << " took " << it.second << "ms" << std::endl;
+	}
 }
 
 // ----	Helpers provided for main routine
