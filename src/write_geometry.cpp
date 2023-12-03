@@ -74,18 +74,20 @@ void WriteGeometryVisitor::operator()(const MultiPolygon &mp) const {
 
 // Multilinestring
 void WriteGeometryVisitor::operator()(const MultiLinestring &mls) const {
-	MultiLinestring current;
+	MultiLinestring simplified;
+	const MultiLinestring* output = &mls;
 	if (simplifyLevel>0) {
 		for(auto const &ls: mls) {
-			current.push_back(simplify(ls, simplifyLevel));
+			simplified.push_back(simplify(ls, simplifyLevel));
 		}
-	} else {
-		current = mls;
+		output = &simplified;
 	}
 
 	pair<int,int> lastPos(0,0);
-	for (MultiLinestring::const_iterator it = current.begin(); it != current.end(); ++it) {
-		XYString scaledString;
+	XYString scaledString;
+	for (MultiLinestring::const_iterator it = output->begin(); it != output->end(); ++it) {
+		scaledString.clear();
+		scaledString.reserve(it->end() - it->begin());
 		for (Linestring::const_iterator jt = it->begin(); jt != it->end(); ++jt) {
 			pair<int,int> xy = bboxPtr->scaleLatpLon(jt->get<1>(), jt->get<0>());
 			scaledString.push_back(xy);
@@ -97,16 +99,17 @@ void WriteGeometryVisitor::operator()(const MultiLinestring &mls) const {
 
 // Linestring
 void WriteGeometryVisitor::operator()(const Linestring &ls) const { 
-	Linestring current;
+	Linestring simplified;
+	const Linestring* output = &ls;
 	if (simplifyLevel>0) {
-		current = simplify(ls, simplifyLevel);
-	} else {
-		current = ls;
+		simplified = simplify(ls, simplifyLevel);
+		output = &simplified;
 	}
 
 	pair<int,int> lastPos(0,0);
 	XYString scaledString;
-	for (Linestring::const_iterator jt = current.begin(); jt != current.end(); ++jt) {
+	scaledString.reserve(output->end() - output->begin());
+	for (Linestring::const_iterator jt = output->begin(); jt != output->end(); ++jt) {
 		pair<int,int> xy = bboxPtr->scaleLatpLon(jt->get<1>(), jt->get<0>());
 		scaledString.push_back(xy);
 	}
@@ -118,6 +121,8 @@ void WriteGeometryVisitor::operator()(const Linestring &ls) const {
 bool WriteGeometryVisitor::writeDeltaString(XYString *scaledString, vector_tile::Tile_Feature *featurePtr, pair<int,int> *lastPos, bool closePath) const {
 	if (scaledString->size()<2) return false;
 	vector<uint32_t> geometry;
+	// We need up to 2 elements per item in scaledString, plus up to 3 for commands.
+	geometry.reserve(scaledString->size() * 2 + 3);
 
 	// Start with a moveTo
 	int lastX = scaledString->at(0).first;

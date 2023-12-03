@@ -105,6 +105,7 @@ MultiPolygon TileBbox::scaleGeometry(MultiPolygon const &src) const {
 		// Copy the outer ring
 		Ring outer;
 		std::vector<Point> points;
+		points.reserve(poly.outer().size());
 		int lastx=INT_MAX, lasty=INT_MAX;
 		for(auto &i: poly.outer()) {
 			auto scaled = scaleLatpLon(i.y(), i.x());
@@ -121,6 +122,7 @@ MultiPolygon TileBbox::scaleGeometry(MultiPolygon const &src) const {
 		for(auto &r: poly.inners()) {
 			Ring inner;
 			points.clear();
+			points.reserve(r.size());
 			lastx=INT_MAX, lasty=INT_MAX;
 			for(auto &i: r) {
 				auto scaled = scaleLatpLon(i.y(), i.x());
