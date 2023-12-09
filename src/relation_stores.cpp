@@ -2,24 +2,24 @@
 
 void BinarySearchRelationStore::reopen() {
 	std::lock_guard<std::mutex> lock(mutex);
-	mOutInLists = std::make_unique<map_t>();
+	relations = std::make_unique<map_t>();
 }
 
-void BinarySearchRelationStore::insert(std::vector<element_t> &relations) {
+void BinarySearchRelationStore::insert(std::vector<element_t> &newRelations) {
 	std::lock_guard<std::mutex> lock(mutex);
-	auto i = mOutInLists->size();
-	mOutInLists->resize(i + relations.size());
-	std::copy(std::make_move_iterator(relations.begin()), std::make_move_iterator(relations.end()), mOutInLists->begin() + i); 
+	auto i = relations->size();
+	relations->resize(i + newRelations.size());
+	std::copy(std::make_move_iterator(newRelations.begin()), std::make_move_iterator(newRelations.end()), relations->begin() + i); 
 }
 
 void BinarySearchRelationStore::clear() {
 	std::lock_guard<std::mutex> lock(mutex);
-	mOutInLists->clear();
+	relations->clear();
 }
 
 std::size_t BinarySearchRelationStore::size() const {
 	std::lock_guard<std::mutex> lock(mutex);
-	return mOutInLists->size(); 
+	return relations->size(); 
 }
 
 void BinarySearchRelationStore::finalize(size_t threadNum) {

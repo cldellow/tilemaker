@@ -10,7 +10,7 @@ class BinarySearchRelationStore: public RelationStore {
 public:	
 
 	void reopen() override;
-	void insert(std::vector<element_t> &relations) override;
+	void insert(std::vector<element_t> &newRelations) override;
 	void clear() override;
 	std::size_t size() const override;
 	void finalize(size_t threadNum) override;
@@ -18,7 +18,7 @@ public:
 private: 	
 	mutable std::mutex mutex;
 	// TODO: why is this a unique_ptr?
-	std::unique_ptr<map_t> mOutInLists;
+	std::unique_ptr<map_t> relations;
 };
 
 #endif

@@ -8,6 +8,8 @@
 class RelationStore {
 public:	
 	using wayid_vector_t = std::vector<WayID, mmap_allocator<WayID>>;
+	// 0 is outeres, 1 is inners
+	// TODO: might be nicer to make this a template struct w/named inners/outers?
 	using relation_entry_t = std::pair<wayid_vector_t, wayid_vector_t>;
 
 	using element_t = std::pair<RelationID, relation_entry_t>;
