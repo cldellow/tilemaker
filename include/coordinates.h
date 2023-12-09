@@ -18,7 +18,8 @@
 #define NODE_SHARDS 16
 typedef uint32_t ShardedNodeID;
 typedef uint64_t NodeID;
-typedef uint64_t WayID;
+typedef uint32_t WayID;
+typedef uint32_t RelationID;
 
 typedef std::vector<WayID> WayVec;
 

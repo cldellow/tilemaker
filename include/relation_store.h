@@ -7,10 +7,10 @@
 
 class RelationStore {
 public:	
-	using wayid_vector_t = std::vector<WayID, mmap_allocator<NodeID>>;
+	using wayid_vector_t = std::vector<WayID, mmap_allocator<WayID>>;
 	using relation_entry_t = std::pair<wayid_vector_t, wayid_vector_t>;
 
-	using element_t = std::pair<WayID, relation_entry_t>;
+	using element_t = std::pair<RelationID, relation_entry_t>;
 	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
 
 	virtual void reopen() = 0;
