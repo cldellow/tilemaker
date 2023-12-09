@@ -14,9 +14,6 @@
 #define IS_RELATION(x) (((x) >> 34) == (USE_RELATION_STORE >> 34))
 #define OSM_ID(x) ((x) & 0b1111111111111111111111111111111111)
 
-class NodeStore;
-class WayStore;
-
 /**
 	\brief OsmMemTiles stores OSM objects in memory and provides a vector of OutputObjectf for specified tiles
 	
@@ -31,20 +28,19 @@ public:
 		size_t threadNum,
 		uint baseZoom,
 		bool includeID,
-		const NodeStore& nodeStore,
-		const WayStore& wayStore
+		const OSMStore& osmStore
 	);
 
 	LatpLon buildNodeGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox) const override;
 	Linestring buildLinestring(const NodeID objectID) const override;
+	MultiLinestring buildMultiLinestring(const NodeID objectID) const override;
 	MultiPolygon buildMultiPolygon(const NodeID objectID) const override;
 
 
 	void Clear();
 
 private:
-	const NodeStore& nodeStore;
-	const WayStore& wayStore;
+	const OSMStore& osmStore;
 };
 
 #endif //_OSM_MEM_TILES

@@ -364,7 +364,9 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 					return;
 				}
 				if(!CorrectGeometry(mp)) return;
-				NodeID id = osmMemTiles.store_multi_polygon(mp);
+
+				//NodeID id = osmMemTiles.store_multi_polygon(mp);
+				NodeID id = USE_RELATION_STORE | originalOsmID;
 				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 				outputs.push_back(std::make_pair(std::move(oo), attributes));
 			}
@@ -395,7 +397,8 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 			}
 			if (!CorrectGeometry(mls)) return;
 
-			NodeID id = osmMemTiles.store_multi_linestring(mls);
+			//NodeID id = osmMemTiles.store_multi_linestring(mls);
+			NodeID id = USE_RELATION_STORE | originalOsmID;
 			lastStoredGeometryId = id;
 			lastStoredGeometryType = geomType;
 			OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
@@ -415,7 +418,8 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 				outputs.push_back(std::make_pair(std::move(oo), attributes));
 			} else {
-				NodeID id = osmMemTiles.store_linestring(ls);
+				//NodeID id = osmMemTiles.store_linestring(ls);
+				NodeID id = USE_RELATION_STORE | originalOsmID;
 				lastStoredGeometryId = id;
 				lastStoredGeometryType = geomType;
 				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
