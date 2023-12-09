@@ -15,6 +15,7 @@ void BinarySearchWayStore::reopen() {
 }
 
 std::vector<LatpLon> BinarySearchWayStore::at(WayID wayid) const {
+	// TODO: this lock is not needed if `at` is only called after we're done inserting
 	std::lock_guard<std::mutex> lock(mutex);
 	
 	auto iter = std::lower_bound(mLatpLonLists->begin(), mLatpLonLists->end(), wayid, [](auto const &e, auto wayid) { 

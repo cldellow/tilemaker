@@ -643,7 +643,7 @@ bool OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_ma
 }
 
 // We are now processing a relation
-void OsmLuaProcessing::setRelation(int64_t relationId, WayVec const &outerWayVec, WayVec const &innerWayVec, const tag_map_t &tags, 
+bool OsmLuaProcessing::setRelation(int64_t relationId, WayVec const &outerWayVec, WayVec const &innerWayVec, const tag_map_t &tags, 
                                    bool isNativeMP,      // only OSM type=multipolygon
                                    bool isInnerOuter) {  // any OSM relation with "inner" and "outer" roles (e.g. type=multipolygon|boundary)
 	reset();
@@ -658,14 +658,14 @@ void OsmLuaProcessing::setRelation(int64_t relationId, WayVec const &outerWayVec
 	currentTags = &tags;
 
 	// Start Lua processing for relation
-	if (!isNativeMP && !supportsWritingRelations) return;
+	if (!isNativeMP && !supportsWritingRelations) return false;
 	try {
 		luaState[isNativeMP ? "way_function" : "relation_function"](this);
 	} catch(luaProcessingException &e) {
 		std::cerr << "Lua error on relation " << originalOsmID << std::endl;
 		exit(1);
 	}
-	if (this->empty()) return;
+	if (this->empty()) return false;
 
 	try {
 		if (isClosed) {
@@ -676,6 +676,7 @@ void OsmLuaProcessing::setRelation(int64_t relationId, WayVec const &outerWayVec
 	} catch(std::out_of_range &err) {
 		cout << "In relation " << originalOsmID << ": " << err.what() << endl;
 	}		
+	return true;
 }
 
 vector<string> OsmLuaProcessing::GetSignificantNodeKeys() {

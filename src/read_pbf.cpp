@@ -218,7 +218,18 @@ bool PbfReader::ReadRelations(
 				try {
 					tag_map_t tags;
 					readTags(pbfRelation, pb, tags);
-					output.setRelation(pbfRelation.id(), outerWayVec, innerWayVec, tags, isMultiPolygon, isInnerOuter);
+					const bool emitted = output.setRelation(pbfRelation.id(), outerWayVec, innerWayVec, tags, isMultiPolygon, isInnerOuter);
+					
+					if (emitted) {
+						// Convert outerWayVec/innerWayVec to mmap allocator
+						relations.push_back(std::make_pair(
+							pbfRelation.id(),
+							std::make_pair(
+								RelationStore::wayid_vector_t(outerWayVec.begin(), outerWayVec.end()),
+								RelationStore::wayid_vector_t(innerWayVec.begin(), innerWayVec.end())
+							)
+						));
+					}
 
 				} catch (std::out_of_range &err) {
 					// Relation is missing a member?

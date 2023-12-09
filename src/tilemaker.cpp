@@ -389,9 +389,8 @@ int main(int argc, char* argv[]) {
 		attributeStore.finalize();
 		osmMemTiles.reportSize();
 		attributeStore.reportSize();
+		std::cout << "RelationStore size: " << osmStore.relations.size() << std::endl;
 
-		// TODO: remove this if we get lazy geometries working
-//		void_mmap_allocator::shutdown(); // this clears the mmap'ed nodes/ways/relations (quickly!)
 	}
 	// ----	Initialise SharedData
 	SourceList sources = {&osmMemTiles, &shpMemTiles};
@@ -632,5 +631,6 @@ int main(int argc, char* argv[]) {
 #endif
 
 	cout << endl << "Filled the tileset with good things at " << sharedData.outputFile << endl;
+	void_mmap_allocator::shutdown(); // this clears the mmap'ed nodes/ways/relations (quickly!)
 }
 
