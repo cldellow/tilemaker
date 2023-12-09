@@ -40,7 +40,15 @@ Linestring OsmMemTiles::buildLinestring(const NodeID objectID) const {
 		for (const LatpLon& node : nodes) {
 			boost::geometry::range::push_back(ls, boost::geometry::make<Point>(node.lon/10000000.0, node.latp/10000000.0));
 		}
-		// TODO: CorrectGeometry?
+		// TODO: CorrectGeometry: extract into shared library?
+		geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
+		geom::is_valid(ls, failure);
+		if (failure==boost::geometry::failure_spikes)
+			geom::remove_spikes(ls);
+		if (failure)
+			make_valid(ls);
+
+
 		return ls;
 	}
 
@@ -64,7 +72,14 @@ MultiPolygon OsmMemTiles::buildMultiPolygon(const NodeID objectID) const {
 		geom::assign_points(p, ls);
 		mp.push_back(p);
 
-		// TODO: CorrectGeometry?
+		// TODO: CorrectGeometry: extract into shared library?
+		geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
+		geom::is_valid(mp, failure);
+		if (failure==boost::geometry::failure_spikes)
+			geom::remove_spikes(mp);
+		if (failure)
+			make_valid(mp);
+
 		return mp;
 	}
 
