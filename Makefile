@@ -113,6 +113,7 @@ tilemaker: \
 	src/pbf_blocks.o \
 	src/read_pbf.o \
 	src/read_shp.o \
+	src/relation_stores.o \
 	src/shared_data.o \
 	src/shp_mem_tiles.o \
 	src/sorted_node_store.o \

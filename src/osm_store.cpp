@@ -9,6 +9,7 @@
 #include <boost/sort/sort.hpp>
 #include "node_store.h"
 #include "way_store.h"
+#include "relation_store.h"
 
 using namespace std;
 namespace bg = boost::geometry;

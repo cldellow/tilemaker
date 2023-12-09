@@ -16,6 +16,7 @@ extern bool verbose;
 
 class NodeStore;
 class WayStore;
+class RelationStore;
 
 //
 // Internal data structures.
@@ -105,48 +106,6 @@ public:
 	}
 };
 
-
-// relation store
-// (this isn't currently used as we don't need to store relations for later processing, but may be needed for nested relations)
-
-class RelationStore {
-
-public:	
-	using wayid_vector_t = std::vector<WayID, mmap_allocator<NodeID>>;
-	using relation_entry_t = std::pair<wayid_vector_t, wayid_vector_t>;
-
-	using element_t = std::pair<WayID, relation_entry_t>;
-	using map_t = std::deque<element_t, mmap_allocator<element_t>>;
-
-	void reopen() {
-		std::lock_guard<std::mutex> lock(mutex);
-		mOutInLists = std::make_unique<map_t>();
-	}
-
-	// @brief Insert a list of relations
-	void insert_front(std::vector<element_t> &new_relations) {
-		std::lock_guard<std::mutex> lock(mutex);
-		auto i = mOutInLists->size();
-		mOutInLists->resize(i + new_relations.size());
-		std::copy(std::make_move_iterator(new_relations.begin()), std::make_move_iterator(new_relations.end()), mOutInLists->begin() + i); 
-	}
-
-	// @brief Make the store empty
-	void clear() {
-		std::lock_guard<std::mutex> lock(mutex);
-		mOutInLists->clear();
-	}
-
-	std::size_t size() const {
-		std::lock_guard<std::mutex> lock(mutex);
-		return mOutInLists->size(); 
-	}
-
-private: 	
-	mutable std::mutex mutex;
-	std::unique_ptr<map_t> mOutInLists;
-};
-
 /**
 	\brief OSM store keeps nodes, ways and relations in memory for later access
 
@@ -155,30 +114,24 @@ private:
 
 	Internal data structures are encapsulated in NodeStore, WayStore and RelationStore classes.
 	These store can be altered for efficient memory use without global code changes.
-	Such data structures have to return const ForwardInputIterators (only *, ++ and == should be supported).
-
-	Possible future improvements to save memory:
-	- pack WayStore (e.g. zigzag PBF encoding and varint)
-	- combine innerWays and outerWays into one vector, with a single-byte index marking the changeover
-	- use two arrays (sorted keys and elements) instead of map
 */
 class OSMStore
 {
 public:
 	NodeStore& nodes;
 	WayStore& ways;
+	RelationStore& relations;
 
 protected:	
 	bool use_compact_nodes = false;
 	bool require_integrity = true;
 
-	RelationStore relations; // unused
 	UsedWays used_ways;
 	RelationScanStore scanned_relations;
 
 public:
 
-	OSMStore(NodeStore& nodes, WayStore& ways): nodes(nodes), ways(ways)
+	OSMStore(NodeStore& nodes, WayStore& ways, RelationStore& relations): nodes(nodes), ways(ways), relations(relations)
 	{ 
 		reopen();
 	}
@@ -190,11 +143,6 @@ public:
 	void use_compact_store(bool use) { use_compact_nodes = use; }
 	void enforce_integrity(bool ei) { require_integrity = ei; }
 	bool integrity_enforced() { return require_integrity; }
-
-	void relations_insert_front(std::vector<RelationStore::element_t> &new_relations) {
-		relations.insert_front(new_relations);
-	}
-	void relations_sort(unsigned int threadNum);
 
 	void mark_way_used(WayID i) { used_ways.insert(i); }
 	bool way_is_used(WayID i) { return used_ways.at(i); }

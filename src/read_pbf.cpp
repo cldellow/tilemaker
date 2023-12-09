@@ -9,6 +9,7 @@
 
 #include "node_store.h"
 #include "way_store.h"
+#include "relation_store.h"
 #include "osm_lua_processing.h"
 #include "mmap_allocator.h"
 
@@ -226,7 +227,7 @@ bool PbfReader::ReadRelations(
 			}
 		}
 
-		osmStore.relations_insert_front(relations);
+		osmStore.relations.insert(relations);
 		return true;
 	}
 	return false;
@@ -536,6 +537,10 @@ int PbfReader::ReadPbfFile(
 		if(phase == ReadPhase::Ways) {
 			osmStore.ways.finalize(threadNum);
 		}
+		if(phase == ReadPhase::Relations) {
+			osmStore.relations.finalize(threadNum);
+		}
+
 	}
 	return 0;
 }
