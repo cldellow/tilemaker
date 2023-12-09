@@ -322,7 +322,7 @@ int main(int argc, char* argv[]) {
 	AttributeStore attributeStore;
 
 	class LayerDefinition layers(config.layers);
-	class OsmMemTiles osmMemTiles(threadNum, config.baseZoom, config.includeID);
+	class OsmMemTiles osmMemTiles(threadNum, config.baseZoom, config.includeID, *nodeStore, *wayStore);
 	class ShpMemTiles shpMemTiles(threadNum, config.baseZoom);
 	osmMemTiles.open();
 	shpMemTiles.open();
@@ -386,7 +386,9 @@ int main(int argc, char* argv[]) {
 		attributeStore.finalize();
 		osmMemTiles.reportSize();
 		attributeStore.reportSize();
-		void_mmap_allocator::shutdown(); // this clears the mmap'ed nodes/ways/relations (quickly!)
+
+		// TODO: remove this if we get lazy geometries working
+//		void_mmap_allocator::shutdown(); // this clears the mmap'ed nodes/ways/relations (quickly!)
 	}
 	// ----	Initialise SharedData
 	SourceList sources = {&osmMemTiles, &shpMemTiles};

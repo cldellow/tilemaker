@@ -77,7 +77,7 @@ public:
 	void setNode(NodeID id, LatpLon node, const tag_map_t &tags);
 
 	/// \brief We are now processing a way
-	void setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags);
+	bool setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags);
 
 	/** \brief We are now processing a relation
 	 * (note that we store relations as ways with artificial IDs, and that

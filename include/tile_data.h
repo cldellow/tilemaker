@@ -337,8 +337,12 @@ public:
 		TileCoordinates coordinates
 	);
 
-	Geometry buildWayGeometry(OutputGeometryType const geomType, NodeID const objectID, const TileBbox &bbox);
-	LatpLon buildNodeGeometry(OutputGeometryType const geomType, NodeID const objectID, const TileBbox &bbox) const;
+	virtual Point buildPoint(const NodeID objectID) const; // TODO I think this function can go away? buildWayGeometry with geomType==POINT_ is impossible
+	virtual Linestring buildLinestring(const NodeID objectID) const;
+	virtual MultiLinestring buildMultiLinestring(const NodeID objectID) const;
+	virtual MultiPolygon buildMultiPolygon(const NodeID objectID) const;
+	Geometry buildWayGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox);
+	virtual LatpLon buildNodeGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox) const;
 
 	void open() {
 		point_store = std::make_unique<point_store_t>();

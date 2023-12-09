@@ -4,6 +4,7 @@
 #include "attribute_store.h"
 #include "helpers.h"
 #include "coordinates_geom.h"
+#include "osm_mem_tiles.h"
 
 
 using namespace std;
@@ -343,13 +344,12 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 
 		if (geomType==POINT_) {
 			Point p = Point(lon, latp);
-
-            if(!CorrectGeometry(p)) return;
-
-			NodeID id = osmMemTiles.store_point(p);
+			if(!CorrectGeometry(p)) return;
+			// NodeID id = osmMemTiles.store_point(p);
+			uint64_t id = USE_NODE_STORE | originalOsmID;
 			OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 			outputs.push_back(std::make_pair(std::move(oo), attributes));
-            return;
+			return;
 		}
 		else if (geomType==POLYGON_) {
 			// polygon
@@ -363,6 +363,10 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 					cout << "In relation " << originalOsmID << ": " << err.what() << endl;
 					return;
 				}
+				if(!CorrectGeometry(mp)) return;
+				NodeID id = osmMemTiles.store_multi_polygon(mp);
+				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
+				outputs.push_back(std::make_pair(std::move(oo), attributes));
 			}
 			else if (isWay) {
 				//Is there a more efficient way to do this?
@@ -371,13 +375,14 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 				geom::assign_points(p, ls);
 
 				mp.push_back(p);
+				if(!CorrectGeometry(mp)) return;
+				//NodeID id = osmMemTiles.store_multi_polygon(mp);
+				NodeID id = USE_WAY_STORE | originalOsmID;
+				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
+				outputs.push_back(std::make_pair(std::move(oo), attributes));
 			}
 
-            if(!CorrectGeometry(mp)) return;
 
-			NodeID id = osmMemTiles.store_multi_polygon(mp);
-			OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
-			outputs.push_back(std::make_pair(std::move(oo), attributes));
 		}
 		else if (geomType==MULTILINESTRING_) {
 			// multilinestring
@@ -400,13 +405,22 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 			// linestring
 			Linestring ls = linestringCached();
 
-            if(!CorrectGeometry(ls)) return;
+			if(!CorrectGeometry(ls)) return;
 
-			NodeID id = osmMemTiles.store_linestring(ls);
-			lastStoredGeometryId = id;
-			lastStoredGeometryType = geomType;
-			OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
-			outputs.push_back(std::make_pair(std::move(oo), attributes));
+			if (isWay && !isRelation) {
+				NodeID id = USE_WAY_STORE | originalOsmID;
+				// osmMemTiles.store_linestring(ls);
+				lastStoredGeometryId = id;
+				lastStoredGeometryType = geomType;
+				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
+				outputs.push_back(std::make_pair(std::move(oo), attributes));
+			} else {
+				NodeID id = osmMemTiles.store_linestring(ls);
+				lastStoredGeometryId = id;
+				lastStoredGeometryType = geomType;
+				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
+				outputs.push_back(std::make_pair(std::move(oo), attributes));
+			}
 		}
 	} catch (std::invalid_argument &err) {
 		cerr << "Error in OutputObject constructor: " << err.what() << endl;
@@ -575,7 +589,7 @@ void OsmLuaProcessing::setNode(NodeID id, LatpLon node, const tag_map_t &tags) {
 }
 
 // We are now processing a way
-void OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags) {
+bool OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags) {
 	reset();
 	originalOsmID = wayId;
 	isWay = true;
@@ -615,9 +629,17 @@ void OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_ma
 		}
 	}
 
+	bool needsToBeStored = false;
 	if (!this->empty()) {
-		osmMemTiles.addGeometryToIndex(linestringCached(), finalizeOutputs(), originalOsmID);
+		const std::vector<OutputObject> outputs = finalizeOutputs();
+		for (const auto& output : outputs)
+			if (output.geomType == LINESTRING_ || output.geomType == POLYGON_)
+				needsToBeStored = true;
+
+		osmMemTiles.addGeometryToIndex(linestringCached(), outputs, originalOsmID);
+		return needsToBeStored;
 	}
+	return false;
 }
 
 // We are now processing a relation

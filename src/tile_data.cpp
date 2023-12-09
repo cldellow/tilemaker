@@ -135,12 +135,42 @@ void TileDataSource::collectLargeObjectsForTile(
 	}
 }
 
+/*
+Geometry TileDataSource::buildWayGeometryInternal(const OutputGeometryType geomType, const NodeID objectID) const {
+}
+*/
+
+Point TileDataSource::buildPoint(const NodeID objectID) const {
+	return retrieve_point(objectID);
+}
+
+Linestring TileDataSource::buildLinestring(const NodeID objectID) const {
+	Linestring ls;
+	const linestring_t& ls2 = retrieve_linestring(objectID);
+	boost::geometry::assign(ls, ls2);
+	return ls;
+}
+
+MultiLinestring TileDataSource::buildMultiLinestring(const NodeID objectID) const {
+	MultiLinestring mls;
+	const multi_linestring_t& mls2 = retrieve_multi_linestring(objectID);
+	boost::geometry::assign(mls, mls2);
+	return mls;
+}
+
+MultiPolygon TileDataSource::buildMultiPolygon(const NodeID objectID) const {
+	MultiPolygon rv;
+	const auto &input = retrieve_multi_polygon(objectID);
+	boost::geometry::assign(rv, input);
+	return rv;
+}
+
 // Build node and way geometries
 Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType, 
                                           NodeID const objectID, const TileBbox &bbox) {
 	switch(geomType) {
 		case POINT_: {
-			auto p = retrieve_point(objectID);
+			Point p = buildPoint(objectID);
 			if (geom::within(p, bbox.clippingBox)) {
 				return p;
 			} 
@@ -148,9 +178,9 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 		}
 
 		case LINESTRING_: {
-			auto const &ls = retrieve_linestring(objectID);
-
 			MultiLinestring out;
+			const Linestring& ls = buildLinestring(objectID);
+
 			if(ls.empty())
 				return out;
 
@@ -175,7 +205,7 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 		}
 
 		case MULTILINESTRING_: {
-			auto const &mls = retrieve_multi_linestring(objectID);
+			const MultiLinestring& mls = buildMultiLinestring(objectID);
 			// investigate whether filtering the constituent linestrings improves performance
 			MultiLinestring result;
 			geom::intersection(mls, bbox.getExtendBox(), result);
@@ -207,8 +237,7 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 
 			if (cachedClip == nullptr) {
 				// The cached multipolygon uses a non-standard allocator, so copy it
-				const auto &input = retrieve_multi_polygon(objectID);
-				boost::geometry::assign(uncached, input);
+				uncached = buildMultiPolygon(objectID);
 			}
 
 			const auto &input = cachedClip == nullptr ? uncached : *cachedClip;

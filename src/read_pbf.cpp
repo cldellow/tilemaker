@@ -116,12 +116,14 @@ bool PbfReader::ReadWays(OsmLuaProcessing &output, PrimitiveGroup &pg, Primitive
 				tag_map_t tags;
 				readTags(pbfWay, pb, tags);
 
+				bool wayEmitted = output.setWay(static_cast<WayID>(pbfWay.id()), llVec, tags);
+
 				// If we need it for later, store the way's coordinates in the global way store
-				if (osmStore.way_is_used(wayId)) {
+				if (wayEmitted || osmStore.way_is_used(wayId)) {
 					llWays.push_back(std::make_pair(wayId, WayStore::latplon_vector_t(llVec.begin(), llVec.end())));
 					nodeWays.push_back(std::make_pair(wayId, nodeVec));
 				}
-				output.setWay(static_cast<WayID>(pbfWay.id()), llVec, tags);
+
 
 			} catch (std::out_of_range &err) {
 				// Way is missing a node?
