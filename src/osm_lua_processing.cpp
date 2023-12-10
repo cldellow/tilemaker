@@ -661,13 +661,12 @@ vector<string> OsmLuaProcessing::GetSignificantNodeKeys() {
 	return luaState["node_keys"];
 }
 
-std::vector<OutputObject> OsmLuaProcessing::finalizeOutputs() {
-	std::vector<OutputObject> list;
-	list.reserve(this->outputs.size());
+std::vector<OutputObject>& OsmLuaProcessing::finalizeOutputs() {
+	finalizedOutputs.clear();
 	for (auto jt = this->outputs.begin(); jt != this->outputs.end(); ++jt) {
 		jt->first.setAttributeSet(attributeStore.add(jt->second));
-		list.push_back(jt->first);
+		finalizedOutputs.push_back(jt->first);
 	}
-	return list;
+	return finalizedOutputs;
 }
 

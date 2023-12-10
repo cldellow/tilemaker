@@ -255,7 +255,8 @@ private:
 	std::vector<std::pair<OutputObject, AttributeSet>> outputs;		// All output objects that have been created
 	const boost::container::flat_map<std::string, std::string>* currentTags;
 
-	std::vector<OutputObject> finalizeOutputs();
+	std::vector<OutputObject>& finalizeOutputs();
+	std::vector<OutputObject> finalizedOutputs;
 };
 
 #endif //_OSM_LUA_PROCESSING_H
