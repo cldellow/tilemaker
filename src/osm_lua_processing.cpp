@@ -378,6 +378,8 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 				Polygon p;
 				geom::assign_points(p, ls);
 
+//				if (ls.size() > 50)
+//					std::cout << std::endl << "chonky way: " << originalOsmID << " " << ls.size() << std::endl;
 				mp.push_back(p);
 				if(!CorrectGeometry(mp)) return;
 				NodeID id = USE_WAY_STORE | originalOsmID;

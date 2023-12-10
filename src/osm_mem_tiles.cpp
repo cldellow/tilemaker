@@ -101,12 +101,14 @@ std::shared_ptr<Linestring> OsmMemTiles::buildLinestring(const NodeID objectID) 
 			cachedLinestrings[shard][objectID] = ls;
 		}
 		*/
-		if (cachedLinestringsSize == 5000) {
-			cachedLinestrings.clear();
-			cachedLinestringsSize = 0;
+		if (nodes.size() > 10) {
+			if (cachedLinestringsSize == 50000) {
+				cachedLinestrings.clear();
+				cachedLinestringsSize = 0;
+			}
+			cachedLinestringsSize++;
+			cachedLinestrings[OSM_ID(objectID)] = ls;
 		}
-		cachedLinestringsSize++;
-		cachedLinestrings[OSM_ID(objectID)] = ls;
 
 		return ls;
 	}
@@ -198,12 +200,16 @@ std::shared_ptr<MultiPolygon> OsmMemTiles::buildMultiPolygon(const NodeID object
 			cachedWayPolygons[shard][objectID] = mp;
 		}
 		*/
-		if (cachedWayPolygonsSize == 5000) {
-			cachedWayPolygons.clear();
-			cachedWayPolygonsSize = 0;
+
+		if (nodes.size() > 10) {
+			// TODO: make a FIFO bounded map class
+			if (cachedWayPolygonsSize == 50000) {
+				cachedWayPolygons.clear();
+				cachedWayPolygonsSize = 0;
+			}
+			cachedWayPolygonsSize++;
+			cachedWayPolygons[OSM_ID(objectID)] = mp;
 		}
-		cachedWayPolygonsSize++;
-		cachedWayPolygons[OSM_ID(objectID)] = mp;
 
 		return mp;
 	}
