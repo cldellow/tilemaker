@@ -313,7 +313,10 @@ const Polygon &OsmLuaProcessing::polygonCached() {
 const MultiPolygon &OsmLuaProcessing::multiPolygonCached() {
 	if (!multiPolygonInited) {
 		multiPolygonInited = true;
-		multiPolygonCache = osmStore.wayListMultiPolygon(
+		multiPolygonCache.clear();
+		//multiPolygonCache = osmStore.wayListMultiPolygon(
+		osmStore.wayListMultiPolygon(
+			multiPolygonCache,
 			outerWayVecPtr->cbegin(), outerWayVecPtr->cend(), innerWayVecPtr->begin(), innerWayVecPtr->cend());
 
 	}
@@ -345,7 +348,6 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 		if (geomType==POINT_) {
 			Point p = Point(lon, latp);
 			if(!CorrectGeometry(p)) return;
-			// NodeID id = osmMemTiles.store_point(p);
 			uint64_t id = USE_NODE_STORE | originalOsmID;
 			OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 			outputs.push_back(std::make_pair(std::move(oo), attributes));
@@ -365,7 +367,6 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 				}
 				if(!CorrectGeometry(mp)) return;
 
-				//NodeID id = osmMemTiles.store_multi_polygon(mp);
 				NodeID id = USE_RELATION_STORE | originalOsmID;
 				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 				outputs.push_back(std::make_pair(std::move(oo), attributes));
@@ -378,7 +379,6 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 
 				mp.push_back(p);
 				if(!CorrectGeometry(mp)) return;
-				//NodeID id = osmMemTiles.store_multi_polygon(mp);
 				NodeID id = USE_WAY_STORE | originalOsmID;
 				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 				outputs.push_back(std::make_pair(std::move(oo), attributes));
@@ -397,7 +397,6 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 			}
 			if (!CorrectGeometry(mls)) return;
 
-			//NodeID id = osmMemTiles.store_multi_linestring(mls);
 			NodeID id = USE_RELATION_STORE | originalOsmID;
 			lastStoredGeometryId = id;
 			lastStoredGeometryType = geomType;
@@ -412,13 +411,11 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 
 			if (isWay && !isRelation) {
 				NodeID id = USE_WAY_STORE | originalOsmID;
-				// osmMemTiles.store_linestring(ls);
 				lastStoredGeometryId = id;
 				lastStoredGeometryType = geomType;
 				OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 				outputs.push_back(std::make_pair(std::move(oo), attributes));
 			} else {
-				//NodeID id = osmMemTiles.store_linestring(ls);
 				NodeID id = USE_RELATION_STORE | originalOsmID;
 				lastStoredGeometryId = id;
 				lastStoredGeometryType = geomType;
@@ -465,8 +462,9 @@ void OsmLuaProcessing::LayerAsCentroid(const string &layerName) {
 Point OsmLuaProcessing::calculateCentroid() {
 	Point centroid;
 	if (isRelation) {
-		Geometry tmp;
-		tmp = osmStore.wayListMultiPolygon(
+		MultiPolygon tmp;
+		osmStore.wayListMultiPolygon(
+			tmp,
 			outerWayVecPtr->cbegin(), outerWayVecPtr->cend(), innerWayVecPtr->begin(), innerWayVecPtr->cend());
 		geom::centroid(tmp, centroid);
 		return Point(centroid.x()*10000000.0, centroid.y()*10000000.0);

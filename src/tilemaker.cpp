@@ -629,6 +629,13 @@ int main(int argc, char* argv[]) {
 		cout << "\nMemory used: " << r_usage.ru_maxrss << endl;
 	}
 #endif
+	if (true) {
+		std::cout << "osmMemTiles.freqs.size = " << osmMemTiles.freqs.size() << std::endl;
+		for (const auto& entry : osmMemTiles.freqs) {
+			std::cout << "freqs " << entry.first << " " << OSM_ID(entry.first) << " " << entry.second << std::endl;
+		}
+	}
+
 
 	cout << endl << "Filled the tileset with good things at " << sharedData.outputFile << endl;
 	void_mmap_allocator::shutdown(); // this clears the mmap'ed nodes/ways/relations (quickly!)

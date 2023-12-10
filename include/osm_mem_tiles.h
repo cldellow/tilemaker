@@ -4,6 +4,9 @@
 
 #include "tile_data.h"
 #include "osm_store.h"
+#include <map>
+#include <memory>
+#include <set>
 
 #define OSM_THRESHOLD (1ull << 34)
 #define USE_NODE_STORE (1ull << 34)
@@ -32,15 +35,25 @@ public:
 	);
 
 	LatpLon buildNodeGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox) const override;
-	Linestring buildLinestring(const NodeID objectID) const override;
+	std::shared_ptr<Linestring> buildLinestring(const NodeID objectID) const override;
 	MultiLinestring buildMultiLinestring(const NodeID objectID) const override;
-	MultiPolygon buildMultiPolygon(const NodeID objectID) const override;
+	std::shared_ptr<MultiPolygon> buildMultiPolygon(const NodeID objectID) const override;
 
+	void relationNeedsCorrection(RelationID id);
 
 	void Clear();
+	mutable std::map<uint64_t, uint64_t> freqs;
 
 private:
 	const OSMStore& osmStore;
+	std::set<RelationID> relationsThatNeedCorrection;
+	mutable std::mutex mutex;
+	mutable std::vector<std::mutex> cacheMutex;
+	mutable std::vector<std::map<uint64_t, std::shared_ptr<MultiPolygon>>> cachedPolygons;
+	mutable std::vector<size_t> polygonCacheSize;
+	mutable std::vector<std::map<uint64_t, std::shared_ptr<Linestring>>> cachedLinestrings;
+	mutable std::vector<size_t> linestringCacheSize;
+
 };
 
 #endif //_OSM_MEM_TILES

@@ -338,9 +338,9 @@ public:
 	);
 
 	virtual Point buildPoint(const NodeID objectID) const; // TODO I think this function can go away? buildWayGeometry with geomType==POINT_ is impossible
-	virtual Linestring buildLinestring(const NodeID objectID) const;
+	virtual std::shared_ptr<Linestring> buildLinestring(const NodeID objectID) const;
 	virtual MultiLinestring buildMultiLinestring(const NodeID objectID) const;
-	virtual MultiPolygon buildMultiPolygon(const NodeID objectID) const;
+	virtual std::shared_ptr<MultiPolygon> buildMultiPolygon(const NodeID objectID) const;
 	Geometry buildWayGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox);
 	virtual LatpLon buildNodeGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox) const;
 

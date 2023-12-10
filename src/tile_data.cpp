@@ -144,10 +144,10 @@ Point TileDataSource::buildPoint(const NodeID objectID) const {
 	return retrieve_point(objectID);
 }
 
-Linestring TileDataSource::buildLinestring(const NodeID objectID) const {
-	Linestring ls;
+std::shared_ptr<Linestring> TileDataSource::buildLinestring(const NodeID objectID) const {
+	std::shared_ptr<Linestring> ls = std::make_shared<Linestring>();
 	const linestring_t& ls2 = retrieve_linestring(objectID);
-	boost::geometry::assign(ls, ls2);
+	boost::geometry::assign(*ls, ls2);
 	return ls;
 }
 
@@ -158,10 +158,10 @@ MultiLinestring TileDataSource::buildMultiLinestring(const NodeID objectID) cons
 	return mls;
 }
 
-MultiPolygon TileDataSource::buildMultiPolygon(const NodeID objectID) const {
-	MultiPolygon rv;
+std::shared_ptr<MultiPolygon> TileDataSource::buildMultiPolygon(const NodeID objectID) const {
+	std::shared_ptr<MultiPolygon> rv = std::make_shared<MultiPolygon>();;
 	const auto &input = retrieve_multi_polygon(objectID);
-	boost::geometry::assign(rv, input);
+	boost::geometry::assign(*rv, input);
 	return rv;
 }
 
@@ -179,7 +179,9 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 
 		case LINESTRING_: {
 			MultiLinestring out;
-			const Linestring& ls = buildLinestring(objectID);
+			std::shared_ptr<Linestring> lsPtr = buildLinestring(objectID);
+
+			const Linestring& ls = *lsPtr;
 
 			if(ls.empty())
 				return out;
@@ -233,14 +235,14 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 				}
 			}
 
-			MultiPolygon uncached;
+			std::shared_ptr<MultiPolygon> uncached;
 
 			if (cachedClip == nullptr) {
 				// The cached multipolygon uses a non-standard allocator, so copy it
 				uncached = buildMultiPolygon(objectID);
 			}
 
-			const auto &input = cachedClip == nullptr ? uncached : *cachedClip;
+			const auto &input = cachedClip == nullptr ? *uncached : *cachedClip;
 
 			Box box = bbox.clippingBox;
 			

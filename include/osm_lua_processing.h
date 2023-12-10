@@ -124,20 +124,21 @@ public:
 	Point calculateCentroid();
 
 	// ----	Requests from Lua to write this way/node to a vector tile's Layer
-    template<class GeometryT>
-    bool CorrectGeometry(GeometryT &geom)
-    {
+	template<class GeometryT>
+	bool CorrectGeometry(GeometryT &geom)
+	{
 #if BOOST_VERSION >= 105800
-        geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
-        if (isRelation && !geom::is_valid(geom,failure)) {
-            if (verbose) std::cout << "Relation " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
-        } else if (isWay && !geom::is_valid(geom,failure)) {
-            if (verbose && failure!=22) std::cout << "Way " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
-        }
+		geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
+		if (isRelation && !geom::is_valid(geom,failure)) {
+			osmMemTiles.relationNeedsCorrection(originalOsmID);
+			if (verbose) std::cout << "Relation " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
+		} else if (isWay && !geom::is_valid(geom,failure)) {
+			if (verbose && failure!=22) std::cout << "Way " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
+		}
 		
 		if (failure==boost::geometry::failure_spikes)
 			geom::remove_spikes(geom);
-        if (failure == boost::geometry::failure_few_points) 
+		if (failure == boost::geometry::failure_few_points) 
 			return false;
 		if (failure) {
 			std::time_t start = std::time(0);
@@ -148,7 +149,7 @@ public:
 		}
 #endif
 		return true;
-    }
+	}
 
 	// Add layer
 	void Layer(const std::string &layerName, bool area);

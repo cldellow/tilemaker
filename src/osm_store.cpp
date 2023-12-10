@@ -24,9 +24,8 @@ void OSMStore::open(std::string const &osm_store_filename)
 	reopen();
 }
 
-MultiPolygon OSMStore::wayListMultiPolygon(WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd, WayVec::const_iterator innerBegin, WayVec::const_iterator innerEnd) const {
-	MultiPolygon mp;
-	if (outerBegin == outerEnd) { return mp; } // no outers so quit
+void OSMStore::wayListMultiPolygon(MultiPolygon& mp, WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd, WayVec::const_iterator innerBegin, WayVec::const_iterator innerEnd) const {
+	if (outerBegin == outerEnd) { return; } // no outers so quit
 
 	std::vector<LatpLonDeque> outers;
 	std::vector<LatpLonDeque> inners;
@@ -55,7 +54,6 @@ MultiPolygon OSMStore::wayListMultiPolygon(WayVec::const_iterator outerBegin, Wa
 
 	// fix winding
 	geom::correct(mp);
-	return mp;
 }
 
 MultiLinestring OSMStore::wayListMultiLinestring(WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd) const {
