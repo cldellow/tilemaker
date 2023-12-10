@@ -24,9 +24,6 @@ std::size_t BinarySearchRelationStore::size() const {
 }
 
 const std::pair<RelationStore::wayid_vector_t, RelationStore::wayid_vector_t>& BinarySearchRelationStore::at(RelationID id) const {
-	// TODO: this lock is not needed if we only call `at` after we're done inserting
-	std::lock_guard<std::mutex> lock(mutex);
-
 	auto it = std::lower_bound(relations->begin(), relations->end(), id, [](auto const &e, auto id) { 
 		return e.first < id; 
 	});
