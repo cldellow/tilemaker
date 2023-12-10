@@ -297,7 +297,8 @@ const Linestring &OsmLuaProcessing::linestringCached() {
 const MultiLinestring &OsmLuaProcessing::multiLinestringCached() {
 	if (!multiLinestringInited) {
 		multiLinestringInited = true;
-		multiLinestringCache = osmStore.wayListMultiLinestring(outerWayVecPtr->cbegin(), outerWayVecPtr->cend());
+		multiLinestringCache.clear();
+		osmStore.wayListMultiLinestring(multiLinestringCache, outerWayVecPtr->cbegin(), outerWayVecPtr->cend());
 	}
 	return multiLinestringCache;
 }

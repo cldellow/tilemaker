@@ -8,6 +8,7 @@
 #include <memory>
 #include <boost/sort/sort.hpp>
 #include "output_object.h"
+#include <boost/compute/detail/lru_cache.hpp>
 
 typedef std::set<TileCoordinates, TileCoordinatesCompare> TileCoordinatesSet;
 
@@ -339,7 +340,7 @@ public:
 
 	virtual Point buildPoint(const NodeID objectID) const; // TODO I think this function can go away? buildWayGeometry with geomType==POINT_ is impossible
 	virtual std::shared_ptr<Linestring> buildLinestring(const NodeID objectID) const;
-	virtual MultiLinestring buildMultiLinestring(const NodeID objectID) const;
+	virtual std::shared_ptr<MultiLinestring> buildMultiLinestring(const NodeID objectID) const;
 	virtual std::shared_ptr<MultiPolygon> buildMultiPolygon(const NodeID objectID) const;
 	Geometry buildWayGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox);
 	virtual LatpLon buildNodeGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox) const;
@@ -433,7 +434,8 @@ public:
 
 
 private:	
-	std::vector<std::map<std::tuple<uint16_t, TileCoordinates, NodeID>, std::shared_ptr<MultiPolygon>>> clipCache;
+//	std::vector<std::map<std::tuple<uint16_t, TileCoordinates, NodeID>, std::shared_ptr<MultiPolygon>>> clipCache;
+	std::vector<boost::compute::detail::lru_cache<std::tuple<uint16_t, TileCoordinates, NodeID>, std::shared_ptr<MultiPolygon>>> clipCache;
 	std::vector<std::mutex> clipCacheMutex;
 	std::vector<size_t> clipCacheSize;
 	void cacheClippedGeometry(const TileBbox& box, const NodeID objectID, const MultiPolygon& mp);

@@ -36,7 +36,7 @@ public:
 
 	LatpLon buildNodeGeometry(const OutputGeometryType geomType, const NodeID objectID, const TileBbox &bbox) const override;
 	std::shared_ptr<Linestring> buildLinestring(const NodeID objectID) const override;
-	MultiLinestring buildMultiLinestring(const NodeID objectID) const override;
+	std::shared_ptr<MultiLinestring> buildMultiLinestring(const NodeID objectID) const override;
 	std::shared_ptr<MultiPolygon> buildMultiPolygon(const NodeID objectID) const override;
 
 	void relationNeedsCorrection(RelationID id);
@@ -48,11 +48,15 @@ private:
 	const OSMStore& osmStore;
 	std::set<RelationID> relationsThatNeedCorrection;
 	mutable std::mutex mutex;
+	/*
 	mutable std::vector<std::mutex> cacheMutex;
+	mutable std::vector<std::map<uint64_t, std::shared_ptr<MultiPolygon>>> cachedWayPolygons;
+	mutable std::vector<size_t> wayPolygonCacheSize;
 	mutable std::vector<std::map<uint64_t, std::shared_ptr<MultiPolygon>>> cachedPolygons;
 	mutable std::vector<size_t> polygonCacheSize;
 	mutable std::vector<std::map<uint64_t, std::shared_ptr<Linestring>>> cachedLinestrings;
 	mutable std::vector<size_t> linestringCacheSize;
+	*/
 
 };
 

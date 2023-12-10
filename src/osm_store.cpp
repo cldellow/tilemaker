@@ -56,9 +56,8 @@ void OSMStore::wayListMultiPolygon(MultiPolygon& mp, WayVec::const_iterator oute
 	geom::correct(mp);
 }
 
-MultiLinestring OSMStore::wayListMultiLinestring(WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd) const {
-	MultiLinestring mls;
-	if (outerBegin == outerEnd) { return mls; }
+void OSMStore::wayListMultiLinestring(MultiLinestring& mls, WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd) const {
+	if (outerBegin == outerEnd) { return; }
 
 	std::vector<LatpLonDeque> linestrings;
 	std::map<WayID,bool> done;
@@ -70,8 +69,6 @@ MultiLinestring OSMStore::wayListMultiLinestring(WayVec::const_iterator outerBeg
 		fillPoints(ls, ot->begin(), ot->end());
 		mls.emplace_back(move(ls));
 	}
-
-	return mls;
 }
 
 // Assemble multipolygon constituent ways

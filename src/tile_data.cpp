@@ -2,8 +2,10 @@
 #include <iostream>
 #include "tile_data.h"
 #include "coordinates_geom.h"
-
 #include <ciso646>
+
+#define USE_RELATION_STORE (3ull << 34)
+#define IS_RELATION(x) (((x) >> 34) == (USE_RELATION_STORE >> 34))
 
 using namespace std;
 extern bool verbose;
@@ -16,10 +18,14 @@ TileDataSource::TileDataSource(size_t threadNum, unsigned int baseZoom, bool inc
 	objects(CLUSTER_ZOOM_AREA),
 	objectsWithIds(CLUSTER_ZOOM_AREA),
 	baseZoom(baseZoom),
-	clipCache(threadNum * 4),
 	clipCacheMutex(threadNum * 4),
 	clipCacheSize(threadNum * 4)
 {
+	clipCache.reserve(threadNum * 4);
+	for (int i = 0; i < threadNum * 4; i++)
+		clipCache.push_back(
+			boost::compute::detail::lru_cache<std::tuple<uint16_t, TileCoordinates, NodeID>, std::shared_ptr<MultiPolygon>>(5000)
+		);
 }
 
 void TileDataSource::finalize(size_t threadNum) {
@@ -151,10 +157,10 @@ std::shared_ptr<Linestring> TileDataSource::buildLinestring(const NodeID objectI
 	return ls;
 }
 
-MultiLinestring TileDataSource::buildMultiLinestring(const NodeID objectID) const {
-	MultiLinestring mls;
+std::shared_ptr<MultiLinestring> TileDataSource::buildMultiLinestring(const NodeID objectID) const {
+	std::shared_ptr<MultiLinestring> mls = std::make_shared<MultiLinestring>();
 	const multi_linestring_t& mls2 = retrieve_multi_linestring(objectID);
-	boost::geometry::assign(mls, mls2);
+	boost::geometry::assign(*mls, mls2);
 	return mls;
 }
 
@@ -207,16 +213,18 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 		}
 
 		case MULTILINESTRING_: {
-			const MultiLinestring& mls = buildMultiLinestring(objectID);
+			std::shared_ptr<MultiLinestring> mls = buildMultiLinestring(objectID);
 			// investigate whether filtering the constituent linestrings improves performance
 			MultiLinestring result;
-			geom::intersection(mls, bbox.getExtendBox(), result);
+			geom::intersection(*mls, bbox.getExtendBox(), result);
 			return result;
 		}
 
 		case POLYGON_: {
 			// Look for a previously clipped version at z-1, z-2, ...
 			std::shared_ptr<MultiPolygon> cachedClip;
+
+			if (IS_RELATION(objectID))
 			{
 				size_t zoom = bbox.zoom;
 				size_t x = bbox.index.x;
@@ -226,10 +234,11 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 					zoom--;
 					x /= 2;
 					y /= 2;
-					const auto& cache = clipCache[objectID % clipCache.size()];
-					const auto& rv = cache.find(std::make_tuple(zoom, TileCoordinates(x, y), objectID));
-					if (rv != cache.end()) {
-						cachedClip = rv->second;
+					auto& cache = clipCache[objectID % clipCache.size()];
+					//const auto& rv = cache.find(std::make_tuple(zoom, TileCoordinates(x, y), objectID));
+					const auto& rv = cache.get(std::make_tuple(zoom, TileCoordinates(x, y), objectID));
+					if (!!rv) {
+						cachedClip = rv.get();
 						break;
 					}
 				}
@@ -302,13 +311,16 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 					MultiPolygon output;
 					geom::intersection(input, box, output);
 					geom::correct(output);
-					cacheClippedGeometry(bbox, objectID, output);
+					if (IS_RELATION(objectID))
+						cacheClippedGeometry(bbox, objectID, output);
 					return output;
 				} else {
 					// occasionally also wrong_topological_dimension, disconnected_interior
 				}
 			}
-			cacheClippedGeometry(bbox, objectID, mp);
+
+			if (IS_RELATION(objectID))
+				cacheClippedGeometry(bbox, objectID, mp);
 			return mp;
 		}
 
@@ -334,6 +346,7 @@ void TileDataSource::cacheClippedGeometry(const TileBbox& box, const NodeID obje
 	//
 	// But for now, just reset the cache every so often to prevent it growing
 	// without bound.
+	/*
 	clipCacheSize[index]++;
 	if (clipCacheSize[index] > 5000) {
 		clipCacheSize[index] = 0;
@@ -341,6 +354,8 @@ void TileDataSource::cacheClippedGeometry(const TileBbox& box, const NodeID obje
 	}
 
 	cache[std::make_tuple(box.zoom, box.index, objectID)] = copy;
+	*/
+	cache.insert(std::make_tuple(box.zoom, box.index, objectID), copy);
 }
 
 LatpLon TileDataSource::buildNodeGeometry(OutputGeometryType const geomType, 
