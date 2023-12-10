@@ -579,18 +579,30 @@ int main(int argc, char* argv[]) {
 			}
 
 			boost::asio::post(pool, [=, &tileCoordinates, &pool, &sharedData, &sources, &attributeStore, &io_mutex, &tilesWritten]() {
+				std::vector<std::string> outputs;
 				std::size_t endIndex = std::min(tileCoordinates.size(), startIndex + batchSize);
 				for(std::size_t i = startIndex; i < endIndex; ++i) {
 					unsigned int zoom = tileCoordinates[i].first;
 					TileCoordinates coords = tileCoordinates[i].second;
+
+					timespec start, end;
+					//clock_gettime(CLOCK_MONOTONIC, &start);
 					std::vector<std::vector<OutputObjectID>> data;
 					for (auto source : sources) {
 						data.emplace_back(source->getObjectsForTile(sortOrders, zoom, coords));
 					}
 					outputProc(sharedData, sources, attributeStore, data, coords, zoom);
+					//clock_gettime(CLOCK_MONOTONIC, &end);
+					//uint64_t tileNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+					//std::string output = "z" + std::to_string(zoom) + "/" + std::to_string(coords.x) + "/" + std::to_string(coords.y) + " took " + std::to_string(tileNs/1e6) + " ms";
+					//outputs.push_back(output);
+
 				}
 
 				const std::lock_guard<std::mutex> lock(io_mutex);
+				//std::cout << std::endl;
+				//for (const auto& output : outputs)
+					//std::cout << output << std::endl;
 				tilesWritten += (endIndex - startIndex); 
 
 				// Show progress grouped by z6 (or lower)
