@@ -4,6 +4,7 @@
 #include "coordinates_geom.h"
 #include <ciso646>
 
+// Here to test if caching only relation polygons helps
 #define USE_RELATION_STORE (3ull << 34)
 #define IS_RELATION(x) (((x) >> 34) == (USE_RELATION_STORE >> 34))
 
@@ -24,7 +25,7 @@ TileDataSource::TileDataSource(size_t threadNum, unsigned int baseZoom, bool inc
 	clipCache.reserve(threadNum * 4);
 	for (int i = 0; i < threadNum * 4; i++)
 		clipCache.push_back(
-			boost::compute::detail::lru_cache<std::tuple<uint16_t, TileCoordinates, NodeID>, std::shared_ptr<MultiPolygon>>(5000)
+			boost::compute::detail::lru_cache<std::tuple<uint16_t, TileCoordinates, NodeID>, std::shared_ptr<MultiPolygon>>(15000)
 		);
 }
 
