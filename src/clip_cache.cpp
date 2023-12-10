@@ -3,12 +3,16 @@
 
 ClipCache::ClipCache(size_t threadNum, unsigned int baseZoom):
 	baseZoom(baseZoom),
-	clipCache(threadNum * 4),
 	clipCacheMutex(threadNum * 4),
 	clipCacheSize(threadNum * 4) {
+	clipCache.reserve(threadNum * 4);
+	for (int i = 0; i < threadNum * 4; i++)
+		clipCache.push_back(
+			boost::compute::detail::lru_cache<std::tuple<uint16_t, TileCoordinates, NodeID>, std::shared_ptr<MultiPolygon>>(5000)
+		);
 }
 
-const std::shared_ptr<MultiPolygon> ClipCache::get(uint zoom, TileCoordinate x, TileCoordinate y, NodeID objectID) const {
+const std::shared_ptr<MultiPolygon> ClipCache::get(uint zoom, TileCoordinate x, TileCoordinate y, NodeID objectID) {
 	// Look for a previously clipped version at z-1, z-2, ...
 
 	std::lock_guard<std::mutex> lock(clipCacheMutex[objectID % clipCacheMutex.size()]);
@@ -16,10 +20,10 @@ const std::shared_ptr<MultiPolygon> ClipCache::get(uint zoom, TileCoordinate x, 
 		zoom--;
 		x /= 2;
 		y /= 2;
-		const auto& cache = clipCache[objectID % clipCache.size()];
-		const auto& rv = cache.find(std::make_tuple(zoom, TileCoordinates(x, y), objectID));
-		if (rv != cache.end()) {
-			return rv->second;
+		auto& cache = clipCache[objectID % clipCache.size()];
+		const auto& rv = cache.get(std::make_tuple(zoom, TileCoordinates(x, y), objectID));
+		if (!!rv) {
+			return rv.get();
 		}
 	}
 
@@ -49,5 +53,5 @@ void ClipCache::add(const TileBbox& box, const NodeID objectID, const MultiPolyg
 		cache.clear();
 	}
 
-	cache[std::make_tuple(box.zoom, box.index, objectID)] = copy;
+	cache.insert(std::make_tuple(box.zoom, box.index, objectID), copy);
 }
