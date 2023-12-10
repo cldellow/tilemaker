@@ -8,6 +8,17 @@
 using namespace std;
 extern bool verbose;
 
+// We use the clip cache to save time re-clipping very large geometries.
+// We only want this for large geometries. It is wasteful for small geometries
+// to use this machinery, so set a flag to ignore them.
+//
+// We set the flag in the output object's ID to avoid doing map lookups--
+// map lookups are O(1) but with a relatively large constant compared to
+// checking if a bit is set.
+#define SET_SKIP_CLIP_CACHE(x) ((1ull << 35) | (x))
+#define TEST_SKIP_CLIP_CACHE(x) (((x) >> 35) == 1)
+#define GEOM_ID(x) ((x) & 0b11111111111111111111111111111111111)
+
 TileDataSource::TileDataSource(size_t threadNum, unsigned int baseZoom, bool includeID)
 	:
 	includeID(includeID),
@@ -182,13 +193,16 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 
 		case POLYGON_: {
 			// Look for a previously clipped version at z-1, z-2, ...
-			std::shared_ptr<MultiPolygon> cachedClip = clipCache.get(bbox.zoom, bbox.index.x, bbox.index.y, objectID);
+			std::shared_ptr<MultiPolygon> cachedClip = nullptr;
+
+			if (!TEST_SKIP_CLIP_CACHE(objectID))
+				clipCache.get(bbox.zoom, bbox.index.x, bbox.index.y, objectID);
 
 			MultiPolygon uncached;
 
 			if (cachedClip == nullptr) {
 				// The cached multipolygon uses a non-standard allocator, so copy it
-				const auto &input = retrieve_multi_polygon(objectID);
+				const auto &input = retrieve_multi_polygon(GEOM_ID(objectID));
 				boost::geometry::assign(uncached, input);
 			}
 
@@ -252,14 +266,16 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 					MultiPolygon output;
 					geom::intersection(input, box, output);
 					geom::correct(output);
-					clipCache.add(bbox, objectID, output);
+					if (!TEST_SKIP_CLIP_CACHE(objectID))
+						clipCache.add(bbox, objectID, output);
 					return output;
 				} else {
 					// occasionally also wrong_topological_dimension, disconnected_interior
 				}
 			}
 
-			clipCache.add(bbox, objectID, mp);
+			if (!TEST_SKIP_CLIP_CACHE(objectID))
+				clipCache.add(bbox, objectID, mp);
 			return mp;
 		}
 
@@ -449,6 +465,14 @@ void TileDataSource::addGeometryToIndex(
 			// Smaller objects - add to each individual tile index
 			for (auto it = tileSet.begin(); it != tileSet.end(); ++it) {
 				TileCoordinates index = *it;
+				// Small polygons don't benefit from the clip cache, but do pollute
+				// the cache and take time fruitlessly searching for hits.
+				//
+				// NB: setRelation can emit points in its list of output objects;
+				//     don't change their IDs.
+				if (output.geomType != POINT_) {
+					output.objectID = SET_SKIP_CLIP_CACHE(output.objectID);
+				}
 				addObjectToSmallIndex(index, output, id);
 			}
 		}
