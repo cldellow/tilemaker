@@ -4,6 +4,7 @@
 #include "attribute_store.h"
 #include "helpers.h"
 #include "coordinates_geom.h"
+#include "lazy_way_nodes.h"
 
 
 using namespace std;
@@ -133,38 +134,38 @@ const string& OsmLuaProcessing::Find(const string& key) const {
 
 vector<string> OsmLuaProcessing::FindIntersecting(const string &layerName) {
 	if      (!isWay   ) { return shpMemTiles.namesOfGeometries(intersectsQuery(layerName, false, getPoint())); }
-	else if (!isClosed && isRelation) { return shpMemTiles.namesOfGeometries(intersectsQuery(layerName, false, multiLinestringCached())); }
-	else if (!isClosed) { return shpMemTiles.namesOfGeometries(intersectsQuery(layerName, false, linestringCached())); }
+	else if (!IsClosed() && isRelation) { return shpMemTiles.namesOfGeometries(intersectsQuery(layerName, false, multiLinestringCached())); }
+	else if (!IsClosed()) { return shpMemTiles.namesOfGeometries(intersectsQuery(layerName, false, linestringCached())); }
 	else if (isRelation){ return shpMemTiles.namesOfGeometries(intersectsQuery(layerName, false, multiPolygonCached())); }
 	else                { return shpMemTiles.namesOfGeometries(intersectsQuery(layerName, false, polygonCached())); }
 }
 
 bool OsmLuaProcessing::Intersects(const string &layerName) {
 	if      (!isWay   ) { return !intersectsQuery(layerName, true, getPoint()).empty(); }
-	else if (!isClosed) { return !intersectsQuery(layerName, true, linestringCached()).empty(); }
-	else if (!isClosed && isRelation) { return !intersectsQuery(layerName, true, multiLinestringCached()).empty(); }
+	else if (!IsClosed()) { return !intersectsQuery(layerName, true, linestringCached()).empty(); }
+	else if (!IsClosed() && isRelation) { return !intersectsQuery(layerName, true, multiLinestringCached()).empty(); }
 	else if (isRelation){ return !intersectsQuery(layerName, true, multiPolygonCached()).empty(); }
 	else                { return !intersectsQuery(layerName, true, polygonCached()).empty(); }
 }
 
 vector<string> OsmLuaProcessing::FindCovering(const string &layerName) {
 	if      (!isWay   ) { return shpMemTiles.namesOfGeometries(coveredQuery(layerName, false, getPoint())); }
-	else if (!isClosed) { return shpMemTiles.namesOfGeometries(coveredQuery(layerName, false, linestringCached())); }
-	else if (!isClosed && isRelation) { return shpMemTiles.namesOfGeometries(coveredQuery(layerName, false, multiLinestringCached())); }
+	else if (!IsClosed()) { return shpMemTiles.namesOfGeometries(coveredQuery(layerName, false, linestringCached())); }
+	else if (!IsClosed() && isRelation) { return shpMemTiles.namesOfGeometries(coveredQuery(layerName, false, multiLinestringCached())); }
 	else if (isRelation){ return shpMemTiles.namesOfGeometries(coveredQuery(layerName, false, multiPolygonCached())); }
 	else                { return shpMemTiles.namesOfGeometries(coveredQuery(layerName, false, polygonCached())); }
 }
 
 bool OsmLuaProcessing::CoveredBy(const string &layerName) {
 	if      (!isWay   ) { return !coveredQuery(layerName, true, getPoint()).empty(); }
-	else if (!isClosed) { return !coveredQuery(layerName, true, linestringCached()).empty(); }
-	else if (!isClosed && isRelation) { return !coveredQuery(layerName, true, multiLinestringCached()).empty(); }
+	else if (!IsClosed()) { return !coveredQuery(layerName, true, linestringCached()).empty(); }
+	else if (!IsClosed() && isRelation) { return !coveredQuery(layerName, true, multiLinestringCached()).empty(); }
 	else if (isRelation){ return !coveredQuery(layerName, true, multiPolygonCached()).empty(); }
 	else                { return !coveredQuery(layerName, true, polygonCached()).empty(); }
 }
 
 double OsmLuaProcessing::AreaIntersecting(const string &layerName) {
-	if      (!isWay || !isClosed) { return 0.0; }
+	if      (!isWay || !IsClosed()) { return 0.0; }
 	else if (isRelation){ return intersectsArea(layerName, multiPolygonCached()); }
 	else                { return intersectsArea(layerName, polygonCached()); }
 }
@@ -226,7 +227,8 @@ std::vector<uint> OsmLuaProcessing::coveredQuery(const string &layerName, bool o
 // Returns whether it is closed polygon
 bool OsmLuaProcessing::IsClosed() const {
 	if (!isWay) return false; // nonsense: it isn't a way
-	return isClosed;
+	if (isRelation) return relationIsClosed;
+	return lazyWayNodesPtr->isClosed();
 }
 
 void reverse_project(DegPoint& p) {
@@ -288,7 +290,7 @@ double OsmLuaProcessing::Length() {
 const Linestring &OsmLuaProcessing::linestringCached() {
 	if (!linestringInited) {
 		linestringInited = true;
-		linestringCache = osmStore.llListLinestring(llVecPtr->cbegin(),llVecPtr->cend());
+		linestringCache = osmStore.llListLinestring(lazyWayNodesPtr->getLlVec().cbegin(),lazyWayNodesPtr->getLlVec().cend());
 	}
 	return linestringCache;
 }
@@ -304,7 +306,7 @@ const MultiLinestring &OsmLuaProcessing::multiLinestringCached() {
 const Polygon &OsmLuaProcessing::polygonCached() {
 	if (!polygonInited) {
 		polygonInited = true;
-		polygonCache = osmStore.llListPolygon(llVecPtr->cbegin(), llVecPtr->cend());
+		polygonCache = osmStore.llListPolygon(lazyWayNodesPtr->getLlVec().cbegin(), lazyWayNodesPtr->getLlVec().cend());
 	}
 	return polygonCache;
 }
@@ -575,12 +577,12 @@ void OsmLuaProcessing::setNode(NodeID id, LatpLon node, const tag_map_t &tags) {
 }
 
 // We are now processing a way
-void OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags) {
+bool OsmLuaProcessing::setWay(WayID wayId, LazyWayNodes& lazyWayNodes, const tag_map_t &tags) {
 	reset();
 	originalOsmID = wayId;
 	isWay = true;
 	isRelation = false;
-	llVecPtr = &llVec;
+	lazyWayNodesPtr = &lazyWayNodes;
 	outerWayVecPtr = nullptr;
 	innerWayVecPtr = nullptr;
 	linestringInited = polygonInited = multiPolygonInited = false;
@@ -589,15 +591,6 @@ void OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_ma
 		relationList = osmStore.relations_for_way(wayId);
 	} else {
 		relationList.clear();
-	}
-
-	try {
-		isClosed = llVecPtr->front()==llVecPtr->back();
-
-	} catch (std::out_of_range &err) {
-		std::stringstream ss;
-		ss << "Way " << originalOsmID << " is missing a node";
-		throw std::out_of_range(ss.str());
 	}
 
 	currentTags = &tags;
@@ -617,6 +610,11 @@ void OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const tag_ma
 
 	if (!this->empty()) {
 		osmMemTiles.addGeometryToIndex(linestringCached(), finalizeOutputs(), originalOsmID);
+//		std::cout << std::endl << "way: yes" << std::endl;
+		return true;
+	} else {
+//		std::cout << std::endl << "way: no" << std::endl;
+		return false;
 	}
 }
 
@@ -628,9 +626,9 @@ void OsmLuaProcessing::setRelation(int64_t relationId, WayVec const &outerWayVec
 	originalOsmID = relationId;
 	isWay = true;
 	isRelation = true;
-	isClosed = isNativeMP || isInnerOuter;
+	relationIsClosed = isNativeMP || isInnerOuter;
 
-	llVecPtr = nullptr;
+	lazyWayNodesPtr = nullptr;
 	outerWayVecPtr = &outerWayVec;
 	innerWayVecPtr = &innerWayVec;
 	currentTags = &tags;
@@ -646,7 +644,7 @@ void OsmLuaProcessing::setRelation(int64_t relationId, WayVec const &outerWayVec
 	if (this->empty()) return;
 
 	try {
-		if (isClosed) {
+		if (IsClosed()) {
 			std::vector<OutputObject> objects = finalizeOutputs();
 			osmMemTiles.addGeometryToIndex(multiPolygonCached(), objects, originalOsmID);
 		} else {

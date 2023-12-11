@@ -11,6 +11,7 @@
 #include "way_store.h"
 #include "osm_lua_processing.h"
 #include "mmap_allocator.h"
+#include "lazy_way_nodes.h"
 
 using namespace std;
 
@@ -90,32 +91,10 @@ bool PbfReader::ReadWays(OsmLuaProcessing &output, PrimitiveGroup &pg, Primitive
 			if (wayId >= pow(2,42)) throw std::runtime_error("Way ID negative or too large: "+std::to_string(wayId));
 
 			// Assemble nodelist
-			LatpLonVec llVec;
-			std::vector<NodeID> nodeVec;
-			if (locationsOnWays) {
-				int lat=0, lon=0;
-				llVec.reserve(pbfWay.lats_size());
-				for (int k=0; k<pbfWay.lats_size(); k++) {
-					lat += pbfWay.lats(k);
-					lon += pbfWay.lons(k);
-					LatpLon ll = { int(lat2latp(double(lat)/10000000.0)*10000000.0), lon };
-					llVec.push_back(ll);
-				}
-			} else {
-				int64_t nodeId = 0;
-				llVec.reserve(pbfWay.refs_size());
-				nodeVec.reserve(pbfWay.refs_size());
-				for (int k=0; k<pbfWay.refs_size(); k++) {
-					nodeId += pbfWay.refs(k);
-					try {
-						llVec.push_back(osmStore.nodes.at(static_cast<NodeID>(nodeId)));
-						nodeVec.push_back(nodeId);
-					} catch (std::out_of_range &err) {
-						if (osmStore.integrity_enforced()) throw err;
-					}
-				}
-			}
-			if (llVec.empty()) continue;
+			LazyWayNodes lazyNodes(pbfWay.id(), locationsOnWays, pbfWay, osmStore);
+
+			// TODO: skip empty ways
+			// This is an edge case - we want to avoid opening the PBF if not needed
 
 			try {
 				tag_map_t tags;
@@ -124,11 +103,15 @@ bool PbfReader::ReadWays(OsmLuaProcessing &output, PrimitiveGroup &pg, Primitive
 				// If we need it for later, store the way's coordinates in the global way store
 				if (osmStore.way_is_used(wayId)) {
 					if (wayStoreRequiresNodes)
-						nodeWays.push_back(std::make_pair(wayId, nodeVec));
-					else
+						nodeWays.push_back(std::make_pair(wayId, lazyNodes.getNodeVec()));
+					else {
+						const auto& llVec = lazyNodes.getLlVec();
 						llWays.push_back(std::make_pair(wayId, WayStore::latplon_vector_t(llVec.begin(), llVec.end())));
+					}
 				}
-				output.setWay(static_cast<WayID>(pbfWay.id()), llVec, tags);
+				if (!output.setWay(static_cast<WayID>(pbfWay.id()), lazyNodes, tags)) {
+//					std::cout << std::endl << "no output, lazyNodes: initedNodes=" << std::to_string(lazyNodes.initedNodes) << ", initedLatLons=" << std::to_string(lazyNodes.initedLatLons) << std::endl;
+				}
 
 			} catch (std::out_of_range &err) {
 				// Way is missing a node?

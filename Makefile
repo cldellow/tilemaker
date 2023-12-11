@@ -103,6 +103,7 @@ tilemaker: \
 	src/external/streamvbyte_zigzag.o \
 	src/geom.o \
 	src/helpers.o \
+	src/lazy_way_nodes.o \
 	src/mbtiles.o \
 	src/mmap_allocator.o \
 	src/node_stores.o \

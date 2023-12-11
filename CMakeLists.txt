@@ -94,6 +94,7 @@ file(GLOB tilemaker_src_files
 	src/external/streamvbyte_zigzag.cc
 	src/geom.cpp
 	src/helpers.cpp
+	src/lazy_way_nodes.cpp
 	src/mbtiles.cpp
 	src/mmap_allocator.cpp
 	src/node_stores.cpp

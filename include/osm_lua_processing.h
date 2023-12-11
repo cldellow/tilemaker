@@ -30,6 +30,7 @@ extern bool verbose;
 
 class AttributeStore;
 class AttributeSet;
+class LazyWayNodes;
 
 /**
 	\brief OsmLuaProcessing - converts OSM objects into OutputObjects.
@@ -77,7 +78,7 @@ public:
 	void setNode(NodeID id, LatpLon node, const tag_map_t &tags);
 
 	/// \brief We are now processing a way
-	void setWay(WayID wayId, LatpLonVec const &llVec, const tag_map_t &tags);
+	bool setWay(WayID wayId, LazyWayNodes& lazyWayNodes, const tag_map_t &tags);
 
 	/** \brief We are now processing a relation
 	 * (note that we store relations as ways with artificial IDs, and that
@@ -199,7 +200,7 @@ private:
 	/// Internal: clear current cached state
 	inline void reset() {
 		outputs.clear();
-		llVecPtr = nullptr;
+		lazyWayNodesPtr = nullptr;
 		outerWayVecPtr = nullptr;
 		innerWayVecPtr = nullptr;
 		linestringInited = false;
@@ -226,14 +227,14 @@ private:
 	AttributeStore &attributeStore;			// key/value store
 
 	int64_t originalOsmID;					///< Original OSM object ID
-	bool isWay, isRelation, isClosed;		///< Way, node, relation?
+	bool isWay, isRelation, relationIsClosed;		///< Way, node, relation?
 
 	bool relationAccepted;					// in scanRelation, whether we're using a non-MP relation
 	std::vector<WayID> relationList;		// in processWay, list of relations this way is in
 	int relationSubscript = -1;				// in processWay, position in the relation list
 
 	int32_t lon,latp;						///< Node coordinates
-	LatpLonVec const *llVecPtr;
+	LazyWayNodes* lazyWayNodesPtr;
 	WayVec const *outerWayVecPtr;
 	WayVec const *innerWayVecPtr;
 
