@@ -251,7 +251,7 @@ void processShapeGeometry(SHPObject* shape, AttributeIndex attrIdx, ShpMemTiles 
 		string reason;
 		if (!geom::is_valid(multi, reason)) {
 			if (verbose) cerr << "Shapefile entity " << shape->nShapeId << " type " << shapeType << " is invalid. Parts:" << shape->nParts << ". Reason:" << reason;
-			make_valid(multi);
+			make_valid(multi, 0);
 			if (verbose) {
 				if (geom::is_valid(multi, reason)) { cerr << "... corrected"; }
 				                              else { cerr << "... failed to correct. Reason: " << reason; }

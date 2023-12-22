@@ -73,9 +73,9 @@ void simplify_combine(C &result, T &&new_element)
 namespace geom = boost::geometry;
 
 template<class GeometryT>
-void make_valid(GeometryT &geom) { }
+void make_valid(GeometryT &geom, uint64_t id) { }
 
-void make_valid(MultiPolygon &mp);
+void make_valid(MultiPolygon &mp, uint64_t id);
 
 Point intersect_edge(Point const &a, Point const &b, char edge, Box const &bbox);
 char bit_code(Point const &p, Box const &bbox);

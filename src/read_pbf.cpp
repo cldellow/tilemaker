@@ -19,19 +19,6 @@ const std::string OptionLocationsOnWays = "LocationsOnWays";
 std::atomic<uint64_t> blocksProcessed(0), blocksToProcess(0);
 std::mutex pbfm;
 
-struct Counts {
-	Counts(): nodeBlocks(0), wayBlocks(0), relationBlocks(0) {}
-	~Counts() {
-		std::lock_guard<std::mutex> lock(pbfm);
-		std::cout  << "nodes=" << nodeBlocks << ", ways=" << wayBlocks << ", relations=" << relationBlocks << std::endl;
-	}
-
-	uint64_t nodeBlocks;
-	uint64_t wayBlocks;
-	uint64_t relationBlocks;
-};
-thread_local Counts counts;
-
 PbfProcessor::PbfProcessor(OSMStore &osmStore)
 	: osmStore(osmStore)
 { }
@@ -77,7 +64,6 @@ bool PbfProcessor::ReadNodes(OsmLuaProcessing& output, PbfReader::PrimitiveGroup
 	}
 
 	if (nodes.size() > 0) {
-		counts.nodeBlocks++;
 		osmStore.nodes.insert(nodes);
 	}
 
@@ -99,8 +85,6 @@ bool PbfProcessor::ReadWays(
 		auto e = pg.ways().end();
 		if (!(b != e)) return false;
 	}
-
-	counts.wayBlocks++;
 
 	const bool wayStoreRequiresNodes = osmStore.ways.requiresNodes();
 
@@ -232,7 +216,6 @@ bool PbfProcessor::ReadRelations(
 		if (!(b != e)) return false;
 	}
 
-	counts.relationBlocks++;
 	std::vector<RelationStore::element_t> relations;
 
 	int typeKey = findStringPosition(pb, "type");
@@ -278,7 +261,17 @@ bool PbfProcessor::ReadRelations(
 			try {
 				tag_map_t tags;
 				readTags(pbfRelation, pb, tags);
+				timespec start, end;
+				clock_gettime(CLOCK_MONOTONIC, &start);
+
 				output.setRelation(pbfRelation.id, outerWayVec, innerWayVec, tags, isMultiPolygon, isInnerOuter);
+				if (pbfRelation.id == 1414848 || pbfRelation.id == 4039486 || pbfRelation.id == 1205151) {
+					clock_gettime(CLOCK_MONOTONIC, &end);
+					uint64_t tileNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+
+					std::lock_guard<std::mutex> lock(pbfm);
+					std::cout << std::endl << "rel: " << pbfRelation.id << ": duration= " << (uint32_t)(tileNs / 1e6) << " ms, members= " << (outerWayVec.size() + innerWayVec.size()) << " outers= " << outerWayVec.size() << " inners= " << innerWayVec.size() << " isMultiPolygon=" << isMultiPolygon << " isInnerOuter=" << isInnerOuter << std::endl;
+				}
 
 			} catch (std::out_of_range &err) {
 				// Relation is missing a member?

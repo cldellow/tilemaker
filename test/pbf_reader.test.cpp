@@ -7,7 +7,7 @@
 MU_TEST(test_pbf_reader) {
 	std::string filename;
 	filename = "test/monaco.pbf";
-//	filename = "/home/cldellow/Downloads/north-america-latest.osm.pbf";
+	filename = "/home/cldellow/Downloads/north-america-latest.osm.pbf";
 //	filename = "/home/cldellow/Downloads/great-britain-latest.osm.pbf";
 //	filename = "/home/cldellow/Downloads/nova-scotia-latest.osm.pbf";
 	std::ifstream monaco(filename, std::ifstream::in);
@@ -15,7 +15,28 @@ MU_TEST(test_pbf_reader) {
 	PbfReader::BlobHeader bh = PbfReader::readBlobHeader(monaco);
 	protozero::data_view blob = PbfReader::readBlob(bh.datasize, monaco);
 	PbfReader::HeaderBlock header = PbfReader::readHeaderBlock(blob);
+	{
+	int blocks = 0;
+	while (!monaco.eof()) {
+		bh = PbfReader::readBlobHeader(monaco);
+		if (bh.type == "eof")
+			break;
 
+
+		blocks++;
+		blob = PbfReader::readBlob(bh.datasize, monaco);
+
+		PbfReader::PrimitiveBlock pb = PbfReader::readPrimitiveBlock(blob);
+		for (auto& group : pb.groups()) {
+			for (auto& rel : group.relations()) {
+				std::cout << "block=" << blocks << ", rel.id=" << rel.id << ", members=" << rel.memids.size() << std::endl;
+			}
+		}
+	}
+	}
+
+
+	return;
 	mu_check(header.hasBbox);
 	mu_check(header.optionalFeatures.size() == 1);
 	mu_check(header.optionalFeatures.find("Sort.Type_then_ID") != header.optionalFeatures.end());

@@ -348,7 +348,7 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 		if (geomType==POINT_) {
 			Point p = Point(lon, latp);
 
-			if(CorrectGeometry(p) == CorrectGeometryResult::Invalid) return;
+			if(CorrectGeometry(p, originalOsmID) == CorrectGeometryResult::Invalid) return;
 
 			NodeID id = USE_NODE_STORE | originalOsmID;
 			if (materializeGeometries)
@@ -365,7 +365,7 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 			if (isRelation) {
 				try {
 					mp = multiPolygonCached();
-					if(CorrectGeometry(mp) == CorrectGeometryResult::Invalid) return;
+					if(CorrectGeometry(mp, originalOsmID) == CorrectGeometryResult::Invalid) return;
 					NodeID id = osmMemTiles.storeMultiPolygon(mp);
 					OutputObject oo(geomType, layers.layerMap[layerName], id, 0, layerMinZoom);
 					outputs.push_back(std::make_pair(std::move(oo), attributes));
@@ -381,7 +381,7 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 				geom::assign_points(p, ls);
 				mp.push_back(p);
 
-				auto correctionResult = CorrectGeometry(mp);
+				auto correctionResult = CorrectGeometry(mp, originalOsmID);
 				if(correctionResult == CorrectGeometryResult::Invalid) return;
 				NodeID id = 0;
 				if (!materializeGeometries && correctionResult == CorrectGeometryResult::Valid) {
@@ -403,7 +403,7 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 				cout << "In relation " << originalOsmID << ": " << err.what() << endl;
 				return;
 			}
-			if (CorrectGeometry(mls) == CorrectGeometryResult::Invalid) return;
+			if (CorrectGeometry(mls, originalOsmID) == CorrectGeometryResult::Invalid) return;
 
 			NodeID id = osmMemTiles.storeMultiLinestring(mls);
 			lastStoredGeometryId = id;
@@ -415,7 +415,7 @@ void OsmLuaProcessing::Layer(const string &layerName, bool area) {
 			// linestring
 			Linestring ls = linestringCached();
 
-			auto correctionResult = CorrectGeometry(ls);
+			auto correctionResult = CorrectGeometry(ls, originalOsmID);
 			if(correctionResult == CorrectGeometryResult::Invalid) return;
 
 			if (isWay && !isRelation) {

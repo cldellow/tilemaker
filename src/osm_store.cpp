@@ -26,6 +26,8 @@ void OSMStore::open(std::string const &osm_store_filename)
 MultiPolygon OSMStore::wayListMultiPolygon(WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd, WayVec::const_iterator innerBegin, WayVec::const_iterator innerEnd) const {
 	MultiPolygon mp;
 	if (outerBegin == outerEnd) { return mp; } // no outers so quit
+	timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
 
 	std::vector<LatpLonDeque> outers;
 	std::vector<LatpLonDeque> inners;
@@ -54,6 +56,13 @@ MultiPolygon OSMStore::wayListMultiPolygon(WayVec::const_iterator outerBegin, Wa
 
 	// fix winding
 	geom::correct(mp);
+
+	clock_gettime(CLOCK_MONOTONIC, &end);
+	uint64_t tileNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+	uint32_t ms = tileNs / 1e6;
+	if (ms > 1000) {
+		std::cout << "wayListMultiPolygon took " << ms << std::endl;
+	}
 	return mp;
 }
 

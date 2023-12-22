@@ -130,8 +130,13 @@ public:
 	enum class CorrectGeometryResult: char { Invalid = 0, Valid = 1, Corrected = 2 };
 	// ----	Requests from Lua to write this way/node to a vector tile's Layer
 	template<class GeometryT>
-	CorrectGeometryResult CorrectGeometry(GeometryT &geom)
+	CorrectGeometryResult CorrectGeometry(GeometryT &geom, uint64_t id)
 	{
+		timespec start, end;
+		if (id == 1414848 || id == 4039486 || id == 1205151) {
+			clock_gettime(CLOCK_MONOTONIC, &start);
+		}
+
 #if BOOST_VERSION >= 105800
 		geom::validity_failure_type failure = geom::validity_failure_type::no_failure;
 		if (isRelation && !geom::is_valid(geom,failure)) {
@@ -139,18 +144,35 @@ public:
 		} else if (isWay && !geom::is_valid(geom,failure)) {
 			if (verbose && failure!=22) std::cout << "Way " << originalOsmID << " has " << boost_validity_error(failure) << std::endl;
 		}
+
+		if (id == 1414848 || id == 4039486 || id == 1205151) {
+			clock_gettime(CLOCK_MONOTONIC, &end);
+			uint64_t tileNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+			start = end;
+			std::cout << "CorrectGeometry(" << id << "): is_valid took " << (uint32_t)(tileNs/1e6) << " ms" << std::endl;
+		}
 		
 		if (failure==boost::geometry::failure_spikes)
 			geom::remove_spikes(geom);
 		if (failure == boost::geometry::failure_few_points) 
 			return CorrectGeometryResult::Invalid;
 		if (failure) {
-			std::time_t start = std::time(0);
-			make_valid(geom);
+			//std::time_t start = std::time(0);
+			make_valid(geom, id);
+			if (id == 1414848 || id == 4039486 || id == 1205151) {
+				clock_gettime(CLOCK_MONOTONIC, &end);
+				uint64_t tileNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+				start = end;
+				std::cout << "CorrectGeometry(" << id << "): make_valid took " << (uint32_t)(tileNs/1e6) << " ms" << std::endl;
+			}
+		
+			/*
 			if (verbose && std::time(0)-start>3) {
 				std::cout << (isRelation ? "Relation " : "Way ") << originalOsmID << " took " << (std::time(0)-start) << " seconds to correct" << std::endl;
 			}
+			*/
 			return CorrectGeometryResult::Corrected;
+
 		}
 #endif
 		return CorrectGeometryResult::Valid;

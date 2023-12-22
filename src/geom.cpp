@@ -1,5 +1,6 @@
 #define BOOST_GEOMETRY_NO_ROBUSTNESS
 #include "geom.h"
+#include <iostream>
 
 #include <boost/geometry/geometries/segment.hpp>
 #include <boost/geometry/index/rtree.hpp>
@@ -135,11 +136,25 @@ MultiPolygon simplify(MultiPolygon const &mp, double max_distance)
 	return result_mp;
 }
 
-void make_valid(MultiPolygon &mp)
+void make_valid(MultiPolygon &mp, uint64_t id)
 {
+	timespec start, end;
 	MultiPolygon result;
+	int i = 0;
 	for(auto const &p: mp) {
+		if (id == 1205151 || id == 4039486) {
+			clock_gettime(CLOCK_MONOTONIC, &start);
+
+		}
 		geometry::correct(p, result, 1E-12);
+		if (id == 1205151 || id == 4039486) {
+			clock_gettime(CLOCK_MONOTONIC, &end);
+			uint64_t tileNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
+			uint32_t ms = tileNs / 1e6;
+			std::cout << "make_valid: id=" << id << " poly " << i << " took " << ms << " ms" << std::endl;
+
+			i++;
+		}
 	}
 	mp = result;
 }
