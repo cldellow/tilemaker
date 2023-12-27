@@ -56,6 +56,7 @@ TileDataSource::TileDataSource(size_t threadNum, unsigned int baseZoom, bool inc
 	multilinestringStores(threadNum),
 	multipolygonStores(threadNum),
 	multiPolygonClipCache(ClipCache<MultiPolygon>(threadNum, baseZoom)),
+	simplifiedPolygonCache(ClipCache<MultiPolygon>(threadNum, baseZoom)),
 	multiLinestringClipCache(ClipCache<MultiLinestring>(threadNum, baseZoom))
 {
 	shardBits = 0;
@@ -229,7 +230,7 @@ void TileDataSource::collectLargeObjectsForTile(
 }
 
 // Build node and way geometries
-Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType, 
+Geometry TileDataSource::buildWayGeometry(double simplifyLevel, OutputGeometryType const geomType, 
                                           NodeID const objectID, const TileBbox &bbox) {
 	switch(geomType) {
 		case POINT_: {
@@ -285,13 +286,33 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 
 		case POLYGON_: {
 			// Look for a previously clipped version at z-1, z-2, ...
-			std::shared_ptr<MultiPolygon> cachedClip = multiPolygonClipCache.get(bbox.zoom, bbox.index.x, bbox.index.y, objectID);
+			// Idea: use simplified cache only for relations. Need a fast way to identify if
+			// geom is relation or way.
+			bool useSimplifiedCache = simplifyLevel > 0 && objectID < (1ull << TILE_DATA_ID_SIZE);
 
+			std::shared_ptr<MultiPolygon> cachedClip;
 			MultiPolygon uncached;
 
-			if (cachedClip == nullptr) {
-				// The cached multipolygon uses a non-standard allocator, so copy it
-				populateMultiPolygon(uncached, objectID);
+
+			if (!useSimplifiedCache) {
+				cachedClip = multiPolygonClipCache.get(bbox.zoom, bbox.index.x, bbox.index.y, objectID);
+
+				if (cachedClip == nullptr) {
+					// The cached multipolygon uses a non-standard allocator, so copy it
+					populateMultiPolygon(uncached, objectID);
+				}
+			} else {
+				cachedClip = simplifiedPolygonCache.get(bbox.zoom, bbox.index.x, bbox.index.y, objectID);
+
+				if (cachedClip == nullptr) {
+					// The cached multipolygon uses a non-standard allocator, so copy it
+					MultiPolygon uncachedRaw;
+					populateMultiPolygon(uncachedRaw, objectID);
+
+					// And simplify it a little bit, as a treat.
+					//std::cout << "simplifying object " << objectID << " at z" << bbox.zoom << ", simplify=" << simplifyLevel << std::endl;
+					uncached = simplify(uncachedRaw, 0.0003);
+				}
 			}
 
 			const auto &input = cachedClip == nullptr ? uncached : *cachedClip;
@@ -354,14 +375,14 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 					MultiPolygon output;
 					geom::intersection(input, box, output);
 					geom::correct(output);
-					multiPolygonClipCache.add(bbox, objectID, output);
+					(useSimplifiedCache ? simplifiedPolygonCache : multiPolygonClipCache).add(bbox, objectID, output);
 					return output;
 				} else {
 					// occasionally also wrong_topological_dimension, disconnected_interior
 				}
 			}
 
-			multiPolygonClipCache.add(bbox, objectID, mp);
+			(useSimplifiedCache ? simplifiedPolygonCache : multiPolygonClipCache).add(bbox, objectID, mp);
 			return mp;
 		}
 

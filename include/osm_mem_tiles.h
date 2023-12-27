@@ -40,6 +40,7 @@ public:
 	std::string name() const override { return "osm"; }
 
 	Geometry buildWayGeometry(
+		double simplifyLevel,
 		const OutputGeometryType geomType, 
 		const NodeID objectID,
 		const TileBbox &bbox

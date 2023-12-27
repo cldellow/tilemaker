@@ -43,12 +43,13 @@ LatpLon OsmMemTiles::buildNodeGeometry(
 }
 
 Geometry OsmMemTiles::buildWayGeometry(
+	double simplifyLevel,
 	const OutputGeometryType geomType, 
 	const NodeID objectID,
 	const TileBbox &bbox
 ) {
 	if (objectID < OSM_THRESHOLD || (geomType == POLYGON_ && IS_WAY(objectID))) {
-		return TileDataSource::buildWayGeometry(geomType, objectID, bbox);
+		return TileDataSource::buildWayGeometry(simplifyLevel, geomType, objectID, bbox);
 	}
 
 	if (geomType == LINESTRING_ && IS_WAY(objectID)) {

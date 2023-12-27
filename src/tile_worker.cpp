@@ -97,6 +97,7 @@ void MergeIntersecting(MultiPolygon &input, MultiPolygon &to_merge) {
 
 template <typename T>
 void CheckNextObjectAndMerge(
+	double simplifyLevel,
 	TileDataSource* source,
 	OutputObjectsConstIt& jt,
 	OutputObjectsConstIt ooSameLayerEnd, 
@@ -126,7 +127,7 @@ void CheckNextObjectAndMerge(
 		}
 
 		try {
-			T to_merge = boost::get<T>(source->buildWayGeometry(oo.oo.geomType, oo.oo.objectID, bbox));
+			T to_merge = boost::get<T>(source->buildWayGeometry(simplifyLevel, oo.oo.geomType, oo.oo.objectID, bbox));
 			MergeIntersecting(g, to_merge);
 		} catch (std::out_of_range &err) { cerr << "Geometry out of range " << gt << ": " << static_cast<int>(oo.oo.objectID) <<"," << err.what() << endl;
 		} catch (boost::bad_get &err) { cerr << "Type error while processing " << gt << ": " << static_cast<int>(oo.oo.objectID) << endl;
@@ -189,7 +190,7 @@ void ProcessObjects(
 		} else {
 			Geometry g;
 			try {
-				g = source->buildWayGeometry(oo.oo.geomType, oo.oo.objectID, bbox);
+				g = source->buildWayGeometry(simplifyLevel, oo.oo.geomType, oo.oo.objectID, bbox);
 			} catch (std::out_of_range &err) {
 				if (verbose) cerr << "Error while processing geometry " << oo.oo.geomType << "," << static_cast<int>(oo.oo.objectID) <<"," << err.what() << endl;
 				continue;
@@ -202,13 +203,13 @@ void ProcessObjects(
 
 			//This may increment the jt iterator
 			if (oo.oo.geomType == LINESTRING_ && zoom < sharedData.config.combineBelow) {
-				CheckNextObjectAndMerge(source, jt, ooSameLayerEnd, bbox, boost::get<MultiLinestring>(g));
+				CheckNextObjectAndMerge(simplifyLevel, source, jt, ooSameLayerEnd, bbox, boost::get<MultiLinestring>(g));
 				MultiLinestring reordered;
 				ReorderMultiLinestring(boost::get<MultiLinestring>(g), reordered);
 				g = move(reordered);
 				oo = *jt;
 			} else if (oo.oo.geomType == POLYGON_ && combinePolygons) {
-				CheckNextObjectAndMerge(source, jt, ooSameLayerEnd, bbox, boost::get<MultiPolygon>(g));
+				CheckNextObjectAndMerge(simplifyLevel, source, jt, ooSameLayerEnd, bbox, boost::get<MultiPolygon>(g));
 				oo = *jt;
 			}
 

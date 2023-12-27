@@ -361,8 +361,14 @@ protected:
 	std::vector<multi_linestring_store_t> multilinestringStores;
 	std::vector<multi_polygon_store_t> multipolygonStores;
 	
+	// These are raw OSM objects, clipped to a tile.
 	ClipCache<MultiPolygon> multiPolygonClipCache;
 	ClipCache<MultiLinestring> multiLinestringClipCache;
+
+	// This is an OSM polygon, but minimally-simplified (eg 0.0001)
+	ClipCache<MultiPolygon> simplifiedPolygonCache;
+
+	// This is like simplifiedPolygonCache, but clipped to a tile.
 
 	std::deque<std::vector<std::tuple<TileCoordinates, OutputObject, uint64_t>>> pendingSmallIndexObjects;
 
@@ -412,7 +418,7 @@ public:
 		TileCoordinates coordinates
 	);
 
-	virtual Geometry buildWayGeometry(OutputGeometryType const geomType, NodeID const objectID, const TileBbox &bbox);
+	virtual Geometry buildWayGeometry(double simplifyLevel, OutputGeometryType const geomType, NodeID const objectID, const TileBbox &bbox);
 	virtual LatpLon buildNodeGeometry(NodeID const objectID, const TileBbox &bbox) const;
 
 	void open() {
