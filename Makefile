@@ -154,6 +154,11 @@ test_deque_map: \
 	test/deque_map.test.o
 	$(CXX) $(CXXFLAGS) -o test.deque_map $^ $(INC) $(LIB) $(LDFLAGS) && ./test.deque_map
 
+test_simplify: \
+	test/simplify.test.o \
+	src/geom.o
+	$(CXX) $(CXXFLAGS) -o test.simplify $^ $(INC) $(LIB) $(LDFLAGS) && ./test.simplify
+
 test_options_parser: \
 	src/options_parser.o \
 	test/options_parser.test.o
