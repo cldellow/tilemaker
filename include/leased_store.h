@@ -49,6 +49,7 @@ class LeasedStore {
 
 public:
 	~LeasedStore() {
+		std::cout << "dtor for LeasedStore" << std::endl;
 		for (const auto& lease : leases) {
 			auto source = lease.first;
 			std::lock_guard<std::mutex> lock(source->storeMutex);

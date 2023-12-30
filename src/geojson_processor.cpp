@@ -14,26 +14,29 @@ namespace geom = boost::geometry;
 
 // Read GeoJSON, and create OutputObjects for all objects within the specified bounding box
 void GeoJSONProcessor::read(class LayerDef &layer, uint layerNum) {
+	boost::asio::thread_pool pool(1);
+	boost::asio::post(pool, [&]() {
+		// Parse the JSON file into a RapidJSON document
+		rapidjson::Document doc;
+		FILE* fp = fopen(layer.source.c_str(), "r");
+		char readBuffer[65536];
+		rapidjson::FileReadStream is(fp, readBuffer, sizeof(readBuffer));
+		doc.ParseStream(is);
+		if (doc.HasParseError()) { throw std::runtime_error("Invalid JSON file."); }
+		fclose(fp);
 
-	// Parse the JSON file into a RapidJSON document
-	rapidjson::Document doc;
-	FILE* fp = fopen(layer.source.c_str(), "r");
-	char readBuffer[65536];
-	rapidjson::FileReadStream is(fp, readBuffer, sizeof(readBuffer));
-	doc.ParseStream(is);
-	if (doc.HasParseError()) { throw std::runtime_error("Invalid JSON file."); }
-	fclose(fp);
+		// If it's just a single top-level feature, process that and return
+		if (strcmp(doc["type"].GetString(), "FeatureCollection") != 0) { 
+			processFeature(std::move(doc.GetObject()), layer, layerNum);
+			return;
+		}
 
-	// If it's just a single top-level feature, process that and return
-	if (strcmp(doc["type"].GetString(), "FeatureCollection") != 0) { 
-		processFeature(std::move(doc.GetObject()), layer, layerNum);
-		return;
-	}
-
-	// Otherwise process each feature
-	for (auto &feature : doc["features"].GetArray()) { 
-		processFeature(std::move(feature.GetObject()), layer, layerNum);
-	}
+		// Otherwise process each feature
+		for (auto &feature : doc["features"].GetArray()) { 
+			processFeature(std::move(feature.GetObject()), layer, layerNum);
+		}
+	});
+	pool.join();
 }
 
 template <bool Flag, typename T>

@@ -366,6 +366,9 @@ protected:
 
 public:
 	TileDataSource(size_t threadNum, unsigned int baseZoom, bool includeID);
+	~TileDataSource() {
+		std::cout << "dtor for TileDataSource" << std::endl;
+	}
 
 	void collectTilesWithObjectsAtZoom(std::vector<TileCoordinatesSet>& zooms);
 
