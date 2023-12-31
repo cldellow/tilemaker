@@ -18,7 +18,7 @@ namespace OptionsParser {
 			std::string message;
 	};
 
-	enum class OutputMode: char { File = 0, MBTiles = 1, PMTiles = 2 };
+	enum class OutputMode: char { File = 0, MBTiles = 1, PMTiles = 2, GeoJSON = 3 };
 
 	struct OsmOptions {
 		std::string storeFile;

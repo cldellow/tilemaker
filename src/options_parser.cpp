@@ -96,6 +96,8 @@ OptionsParser::Options OptionsParser::parse(const int argc, const char* argv[]) 
 		options.outputMode = OutputMode::MBTiles;
 	} else if (ends_with(options.outputFile, ".pmtiles")) {
 		options.outputMode = OutputMode::PMTiles;
+	} else if (ends_with(options.outputFile, ".geojson")) {
+		options.outputMode = OutputMode::GeoJSON;
 	}
 
 	if (options.threadNum == 0) {
