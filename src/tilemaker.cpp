@@ -30,6 +30,8 @@
 #include "rapidjson/filereadstream.h"
 #include "rapidjson/filewritestream.h"
 
+#include "geojson_writer.h"
+
 #ifndef _MSC_VER
 #include <sys/resource.h>
 #endif
@@ -100,7 +102,7 @@ int main(const int argc, const char* argv[]) {
 	vector<string> bboxElements = parseBox(options.bbox);
 
 	// ---- Remove existing .mbtiles if it exists
-	if ((options.outputMode == OptionsParser::OutputMode::MBTiles || options.outputMode == OptionsParser::OutputMode::PMTiles) && !options.mergeSqlite && static_cast<bool>(std::ifstream(options.outputFile))) {
+	if ((options.outputMode == OptionsParser::OutputMode::GeoJSON || options.outputMode == OptionsParser::OutputMode::MBTiles || options.outputMode == OptionsParser::OutputMode::PMTiles) && !options.mergeSqlite && static_cast<bool>(std::ifstream(options.outputFile))) {
 		cout << "Output file exists, will overwrite (Ctrl-C to abort";
 		if (options.outputMode == OptionsParser::OutputMode::MBTiles) cout << ", rerun with --merge to keep";
 		cout << ")" << endl;
@@ -312,6 +314,25 @@ int main(const int argc, const char* argv[]) {
 	}
 
 	// ----	Write out data
+	if (sharedData.outputMode == OptionsParser::OutputMode::GeoJSON) {
+		std::cout << "dumping features" << std::endl;
+	  GeoJSONWriter writer;
+
+		// This is _all_ kinds of hacks. You need to run tilemaker with --materialize-geometries
+		// so that the OSM store is populated, e.g.
+		for (const auto& storePair : osmMemTiles.availableMultiPolygonStoreLeases) {
+			for (const auto& mp : *storePair.second) {
+				// Convert to std allocator
+				MultiPolygon mp2;
+				boost::geometry::assign(mp2, mp);
+				writer.addGeometry(mp2);
+			}
+		}
+
+		writer.finalise(true);
+		writer.toFile(options.outputFile);
+		return 0;
+	}
 
 	// Launch the pool with threadNum threads
 	boost::asio::thread_pool pool(options.threadNum);
