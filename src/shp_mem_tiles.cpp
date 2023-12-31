@@ -4,6 +4,8 @@ using namespace std;
 namespace geom = boost::geometry;
 extern bool verbose;
 
+std::mutex shpMutex;
+
 ShpMemTiles::ShpMemTiles(size_t threadNum, uint baseZoom)
 	: TileDataSource(threadNum, baseZoom, false)
 { }
@@ -66,12 +68,13 @@ void ShpMemTiles::StoreGeometry(
 	uint minzoom,
 	AttributeIndex attrIdx
 ) {
+	std::lock_guard<std::mutex> lock(shpMutex);
 
 	geom::model::box<Point> box;
 	geom::envelope(geometry, box);
 
-	uint id = indexedGeometries.size();
 	if (isIndexed) {
+		uint id = indexedGeometries.size();
 		indices.at(layerName).insert(std::make_pair(box, id));
 		if (hasName)
 			indexedGeometryNames[id] = name;
