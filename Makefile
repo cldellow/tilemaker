@@ -164,6 +164,11 @@ test_options_parser: \
 	test/options_parser.test.o
 	$(CXX) $(CXXFLAGS) -o test.options_parser $^ $(INC) $(LIB) $(LDFLAGS) && ./test.options_parser
 
+test_polylabel: \
+	test/polylabel.test.o \
+	src/geom.o
+	$(CXX) $(CXXFLAGS) -o test.polylabel $^ $(INC) $(LIB) $(LDFLAGS) && ./test.polylabel
+
 test_pooled_string: \
 	src/mmap_allocator.o \
 	src/pooled_string.o \
