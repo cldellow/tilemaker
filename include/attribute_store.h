@@ -5,10 +5,8 @@
 #include <mutex>
 #include <deque>
 #include <map>
-#include <iostream>
 #include <atomic>
 #include <boost/functional/hash.hpp>
-#include <boost/container/flat_map.hpp>
 #include <vector>
 #include <protozero/data_view.hpp>
 #include "pooled_string.h"

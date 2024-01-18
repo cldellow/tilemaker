@@ -3,11 +3,9 @@
 */
 
 #include "output_object.h"
-#include "helpers.h"
-#include "coordinates_geom.h"
+#include "attribute_store.h"
 #include <iostream>
 using namespace std;
-namespace geom = boost::geometry;
 
 // **********************************************************
 

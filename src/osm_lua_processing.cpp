@@ -11,6 +11,10 @@
 #include "polylabel.h"
 #include <signal.h>
 
+#include <boost/geometry/strategies/cartesian/centroid_average.hpp>
+#include <boost/geometry/strategies/cartesian/centroid_bashein_detmer.hpp>
+#include <boost/geometry/strategies/cartesian/centroid_weighted_length.hpp>
+
 using namespace std;
 
 const std::string EMPTY_STRING = "";

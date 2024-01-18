@@ -4,6 +4,7 @@
 
 #include <zlib.h>
 #include <sstream>
+#include <string>
 #include <vector>
 
 // General helper routines

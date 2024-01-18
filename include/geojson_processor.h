@@ -8,8 +8,10 @@
 #include <map>
 #include "geom.h"
 #include "output_object.h"
-#include "osm_lua_processing.h"
 #include "attribute_store.h"
+#include "rapidjson/document.h"
+
+class OsmLuaProcessing;
 
 class GeoJSONProcessor {
 

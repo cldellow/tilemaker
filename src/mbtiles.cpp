@@ -1,13 +1,11 @@
 #include "mbtiles.h"
 #include "helpers.h"
-#include <iostream>
 #include <cmath>
 #include <boost/iostreams/filtering_streambuf.hpp>
 #include <boost/iostreams/copy.hpp>
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/filter/gzip.hpp>
 #include <boost/iostreams/filter/zlib.hpp>
-#include <boost/iostreams/device/array.hpp>
 
 using namespace sqlite;
 using namespace std;

@@ -328,13 +328,7 @@ public:
 		return out;
 	}
 
-	template<class WayIt>
-	Polygon llListPolygon(WayIt begin, WayIt end) const {
-		Polygon poly;
-		fillPoints(poly.outer(), begin, end);
-		boost::geometry::correct(poly);
-		return poly;
-	}
+	Polygon llListPolygon(LatpLonVec::const_iterator begin, LatpLonVec::const_iterator end) const;
 
 	// Way -> Linestring
 	template<class WayIt>

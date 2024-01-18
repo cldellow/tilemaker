@@ -8,6 +8,8 @@
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/filereadstream.h"
 
+#include "osm_lua_processing.h"
+
 extern bool verbose;
 
 namespace geom = boost::geometry;

@@ -16,6 +16,10 @@
 #include "pbf_reader.h"
 #include <protozero/data_view.hpp>
 
+#include <boost/geometry/algorithms/intersection.hpp>
+#include <boost/geometry/algorithms/is_valid.hpp>
+#include <boost/geometry/algorithms/remove_spikes.hpp>
+#include <boost/geometry/algorithms/validity_failure_type.hpp>
 #include <boost/container/flat_map.hpp>
 
 class TagMap;

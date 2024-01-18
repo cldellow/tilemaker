@@ -11,8 +11,8 @@ using uint = unsigned int;
 
 // boost::geometry
 #define BOOST_GEOMETRY_NO_ROBUSTNESS
-#include <boost/geometry.hpp>
-#include <boost/geometry/algorithms/intersection.hpp>
+#include <boost/geometry/algorithms/make.hpp>
+#include <boost/geometry/algorithms/union.hpp>
 #include <boost/geometry/geometries/geometries.hpp>
 #include <boost/geometry/geometries/point_xy.hpp>
 #include <boost/geometry/index/rtree.hpp>
@@ -20,12 +20,6 @@ using uint = unsigned int;
 #include <boost/geometry/geometries/register/ring.hpp>
 #include <boost/geometry/geometries/register/multi_linestring.hpp>
 #include <boost/geometry/geometries/register/multi_polygon.hpp>
-#include <boost/container/scoped_allocator.hpp>
-
-#include <boost/interprocess/managed_external_buffer.hpp>
-#include <boost/interprocess/allocators/node_allocator.hpp>
-
-namespace bi = boost::interprocess;
 
 typedef boost::geometry::model::d2::point_xy<double> Point; 
 typedef boost::geometry::model::point<double, 2, boost::geometry::cs::spherical_equatorial<boost::geometry::degree> > DegPoint;

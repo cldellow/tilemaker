@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include <ciso646>
+#include <boost/geometry/algorithms/correct.hpp>
 #include <boost/sort/sort.hpp>
 #include "node_store.h"
 #include "way_store.h"
@@ -59,6 +60,12 @@ void OSMStore::open(std::string const &osm_store_filename)
 {
 	void_mmap_allocator::openMmapFile(osm_store_filename);
 	reopen();
+}
+Polygon OSMStore::llListPolygon(LatpLonVec::const_iterator begin, LatpLonVec::const_iterator end) const {
+	Polygon poly;
+	fillPoints(poly.outer(), begin, end);
+	boost::geometry::correct(poly);
+	return poly;
 }
 
 MultiPolygon OSMStore::wayListMultiPolygon(WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd, WayVec::const_iterator innerBegin, WayVec::const_iterator innerEnd) const {

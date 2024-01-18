@@ -2,20 +2,17 @@
 #ifndef _OUTPUT_OBJECT_H
 #define _OUTPUT_OBJECT_H
 
-#include <vector>
-#include <string>
-#include <map>
-#include <memory>
-#include "geom.h"
+#include <cmath>
 #include "coordinates.h"
-#include "attribute_store.h"
-#include "osm_store.h"
 #include <vtzero/builder.hpp>
 
 enum OutputGeometryType : unsigned int { POINT_, LINESTRING_, MULTILINESTRING_, POLYGON_ };
 
 //\brief Display the geometry type
 std::ostream& operator<<(std::ostream& os, OutputGeometryType geomType);
+
+class AttributeStore;
+typedef uint32_t AttributeIndex;
 
 /**
  * \brief OutputObject - any object (node, linestring, polygon) to be outputted to tiles

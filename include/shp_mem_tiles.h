@@ -3,6 +3,7 @@
 #define _SHP_MEM_TILES
 
 #include "tile_data.h"
+#include <boost/geometry/algorithms/correct.hpp>
 
 extern bool verbose;
 
