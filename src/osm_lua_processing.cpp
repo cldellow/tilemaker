@@ -9,6 +9,7 @@
 #include "tag_map.h"
 #include "node_store.h"
 #include "polylabel.h"
+#include "geojson_writer.h"
 #include <signal.h>
 
 using namespace std;
@@ -156,6 +157,72 @@ std::string rawFindInRelation(const std::string& key) { return osmLuaProcessing-
 void rawAccept() { return osmLuaProcessing->Accept(); }
 double rawAreaIntersecting(const std::string& layerName) { return osmLuaProcessing->AreaIntersecting(layerName); }
 
+kaguya::optional<std::string> rawGeoJSON(bool area) {
+	return osmLuaProcessing->GeoJSON(area);
+}
+
+kaguya::optional<std::string> OsmLuaProcessing::GeoJSON(bool area) {
+	OutputGeometryType geomType = isRelation ? (area ? POLYGON_ : MULTILINESTRING_ ) :
+	                                   isWay ? (area ? POLYGON_ : LINESTRING_) : POINT_;
+
+	Document document;
+	Value geometry(kObjectType);
+	bool unproject = true;
+
+	AnyGeometry g = Point(0, 0);
+	if (geomType==POINT_) {
+		Point p = Point(lon, latp);
+		if(CorrectGeometry(p) == CorrectGeometryResult::Invalid) kaguya::optional<std::string>();
+		g = p;
+	} else if (geomType==POLYGON_) {
+		MultiPolygon mp;
+
+		if (isRelation) {
+			try {
+				mp = multiPolygonCached();
+				if(CorrectGeometry(mp) == CorrectGeometryResult::Invalid) return kaguya::optional<std::string>();
+				g = mp;
+			} catch(std::out_of_range &err) {
+				return kaguya::optional<std::string>();
+			}
+		}
+		else if (isWay) {
+			Linestring ls = linestringCached();
+			Polygon p;
+			geom::assign_points(p, ls);
+			mp.push_back(p);
+
+			auto correctionResult = CorrectGeometry(mp);
+			if(correctionResult == CorrectGeometryResult::Invalid) return kaguya::optional<std::string>();
+			g = mp;
+		}
+	} else if (geomType==MULTILINESTRING_) {
+		MultiLinestring mls;
+		try {
+			mls = multiLinestringCached();
+		} catch(std::out_of_range &err) {
+			return kaguya::optional<std::string>();
+		}
+		if (CorrectGeometry(mls) == CorrectGeometryResult::Invalid) return kaguya::optional<std::string>();
+		g = mls;
+	} else if (geomType==LINESTRING_) {
+		Linestring ls = linestringCached();
+
+		auto correctionResult = CorrectGeometry(ls);
+		if(correctionResult == CorrectGeometryResult::Invalid) return kaguya::optional<std::string>();
+		g = ls;
+	}
+
+	boost::apply_visitor(GeoJSONWriter::SerialiseGeometry(&geometry, &(document.GetAllocator()), unproject), g);
+
+	StringBuffer buffer;
+	Writer<StringBuffer> writer(buffer);
+	writer.SetMaxDecimalPlaces(5);
+	geometry.Accept(writer);
+	std::string json(buffer.GetString(), buffer.GetSize());
+	return json;
+}
+
 
 bool supportsRemappingShapefiles = false;
 
@@ -205,6 +272,7 @@ OsmLuaProcessing::OsmLuaProcessing(
 	luaState["FindCovering"] = &rawFindCovering;
 	luaState["CoveredBy"] = &rawCoveredBy;
 	luaState["IsClosed"] = &rawIsClosed;
+	luaState["GeoJSON"] = &rawGeoJSON;
 	luaState["Area"] = &rawArea;
 	luaState["AreaIntersecting"] = &rawAreaIntersecting;
 	luaState["Length"] = &rawLength;
