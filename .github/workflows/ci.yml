@@ -2,63 +2,19 @@ name: "Continuous Integration"
 
 on:
   push:
-    branches: [ master ]
-  pull_request:
+    branches: [ geojson-build ]
+    #  pull_request:
 
 env:
   AREA: liechtenstein
 
 jobs:
-
-  Windows-Build:
-    name: Windows build
-    runs-on: windows-latest
-
-    steps:
-    - uses: actions/checkout@v2
-
-    - name: Enable vcpkg cache
-      uses: actions/cache@v2
-      with:
-        path: c:\vcpkg\installed
-        key: windows-vcpkg-x64-0 # Increase the number whenever dependencies are modified
-        restore-keys: windows-vcpkg-x64
-
-    - name: Build dependencies
-      run: |
-        vcpkg install --triplet=x64-windows-static-md lua shapelib zlib protobuf[zlib] sqlite3 boost-program-options boost-filesystem boost-geometry boost-system boost-asio boost-interprocess boost-iostreams boost-sort rapidjson
-
-    - name: Build tilemaker
-      run: |
-        mkdir ${{ github.workspace }}\build        
-        cd ${{ github.workspace }}\build && cmake -DTILEMAKER_BUILD_STATIC=ON -DVCPKG_TARGET_TRIPLET="x64-windows-static-md" -DCMAKE_TOOLCHAIN_FILE="c:\vcpkg\scripts\buildsystems\vcpkg.cmake"  ..
-        cd ${{ github.workspace }}\build && cmake --build . --config RelWithDebInfo
-
-    - name: Build openmaptiles-compatible mbtiles files of Liechtenstein
-      run: |
-        Invoke-WebRequest -Uri http://download.geofabrik.de/europe/${{ env.AREA }}-latest.osm.pbf -OutFile ${{ env.AREA }}.osm.pbf
-        ${{ github.workspace }}\build\RelWithDebInfo\tilemaker.exe ${{ env.AREA }}.osm.pbf --config=resources/config-openmaptiles.json --process=resources/process-openmaptiles.lua --output=${{ env.AREA }}.mbtiles --store osm_store --verbose || true
-
-    - name: 'Upload compiled executable'
-      uses: actions/upload-artifact@v2
-      with:
-        name: tilemaker-windows
-        path: |
-          ${{ github.workspace }}\resources
-          ${{ github.workspace }}\build\RelWithDebInfo\tilemaker.exe
-          ${{ github.workspace }}\build\RelWithDebInfo\*.pdb
-
   unix-build:  
     strategy:  
       matrix: 
         include:
           - os: ubuntu-22.04
             triplet: x64-linux
-            executable: tilemaker
-            path: /usr/local/share/vcpkg/installed
-            toolchain: /usr/local/share/vcpkg/scripts/buildsystems/vcpkg.cmake
-          - os: macos-latest
-            triplet: x64-osx
             executable: tilemaker
             path: /usr/local/share/vcpkg/installed
             toolchain: /usr/local/share/vcpkg/scripts/buildsystems/vcpkg.cmake
@@ -78,15 +34,17 @@ jobs:
 
     - name: Build dependencies
       run: |
-        vcpkg install --triplet=${{ matrix.triplet }} lua shapelib zlib protobuf[zlib] sqlite3 boost-program-options boost-filesystem boost-geometry boost-system boost-asio boost-interprocess boost-iostreams boost-sort rapidjson
+        sudo apt install build-essential libboost-dev libboost-filesystem-dev libboost-iostreams-dev libboost-program-options-dev libboost-system-dev luajit liblua5.1-0-dev libluajit-5.1-dev libshp-dev libsqlite3-dev rapidjson-dev zlib1g-dev
 
     - name: Build tilemaker
       run: |
-        mkdir build        
-        cd build        
-        cmake -DTILEMAKER_BUILD_STATIC=ON -DCMAKE_BUILD_TYPE=Release -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }} -DCMAKE_CXX_COMPILER=g++ ..
-        cmake --build . 
-        strip tilemaker
+        make -j
+
+    - name: Publish tilemaker
+      uses: actions/upload-artifact@v4
+      with:
+        name: tilemaker
+        path: tilemaker
 
     - name: Build openmaptiles-compatible mbtiles files of Liechtenstein
       run: |
@@ -100,64 +58,3 @@ jobs:
         path: |
           ${{ github.workspace }}/resources
           ${{ github.workspace }}/build/${{ matrix.executable }}
-
-  Github-Action:
-    name: Generate mbtiles with Github Action
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Check out repository
-      uses: actions/checkout@v2
-
-    - name: Download PBF file
-      run: curl http://download.geofabrik.de/europe/${AREA}-latest.osm.pbf -o ${AREA}.osm.pbf
-
-    - name: Build openmaptiles-compatible mbtiles files of given area
-      uses: ./
-      with:
-        input: ${{ env.AREA }}.osm.pbf 
-        output: ${{ env.AREA }}.mbtiles
-
-  docker-build:
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}
-
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Log in to the Container registry
-        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-
-      - name: Build Docker image
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
-        if: ${{ github.ref != 'refs/heads/master'}}
-        with:
-          context: .
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-      - name: Build and push Docker image
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
-        if: ${{ github.ref == 'refs/heads/master'}}
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
