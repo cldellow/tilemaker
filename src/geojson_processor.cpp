@@ -58,6 +58,7 @@ void GeoJSONProcessor::readFeatureLines(class LayerDef &layer, uint layerNum) {
 			char readBuffer[65536];
 			rapidjson::FileReadStream is(fp, readBuffer, sizeof(readBuffer));
 
+			while(is.Tell() < chunk.length && isspace(is.Peek())) is.Take();
 			while(is.Tell() < chunk.length) {
 				auto doc = rapidjson::Document();
 				doc.ParseStream<rapidjson::kParseStopWhenDoneFlag>(is);
