@@ -44,13 +44,15 @@ thread_local LeasedStore<TileDataSource::multi_polygon_store_t> multipolygonStor
 TileDataSource::TileDataSource(size_t threadNum, unsigned int baseZoom, bool includeID)
 	:
 	includeID(includeID),
-	z6OffsetDivisor(baseZoom >= CLUSTER_ZOOM ? (1 << (baseZoom - CLUSTER_ZOOM)) : 1),
+
 	objectsMutex(threadNum * 4),
 	objects(CLUSTER_ZOOM_AREA),
 	lowZoomObjects(CLUSTER_ZOOM_AREA),
 	objectsWithIds(CLUSTER_ZOOM_AREA),
 	lowZoomObjectsWithIds(CLUSTER_ZOOM_AREA),
 	baseZoom(baseZoom),
+	indexZoom(baseZoom > 14 ? 14 : baseZoom),
+	z6OffsetDivisor(indexZoom >= CLUSTER_ZOOM ? (1 << (indexZoom - CLUSTER_ZOOM)) : 1),
 	pointStores(threadNum),
 	linestringStores(threadNum),
 	multilinestringStores(threadNum),
@@ -90,13 +92,19 @@ void TileDataSource::finalize(size_t threadNum) {
 	finalizeObjects<OutputObjectXYID>(name(), threadNum, baseZoom, objectsWithIds.begin(), objectsWithIds.end(), lowZoomObjectsWithIds);
 }
 
-void TileDataSource::addObjectToSmallIndex(const TileCoordinates& index, const OutputObject& oo, uint64_t id) {
+void TileDataSource::addObjectToSmallIndex(TileCoordinates index, const OutputObject& oo, uint64_t id) {
+	// `index` is in terms of `baseZoom`, translate it to `indexZoom` if needed.
+	if (baseZoom > indexZoom) {
+		index.x /= 1 << (baseZoom - indexZoom);
+		index.y /= 1 << (baseZoom - indexZoom);
+	}
+
 	// Pick the z6 index
 	const size_t z6x = index.x / z6OffsetDivisor;
 	const size_t z6y = index.y / z6OffsetDivisor;
 
 	if (z6x >= 64 || z6y >= 64) {
-		if (verbose) std::cerr << "ignoring OutputObject with invalid z" << baseZoom << " coordinates " << index.x << ", " << index.y << " (id: " << id << ")" << std::endl;
+		if (verbose) std::cerr << "ignoring OutputObject with invalid z" << indexZoom << " coordinates " << index.x << ", " << index.y << " (id: " << id << ")" << std::endl;
 		return;
 	}
 
@@ -119,7 +127,12 @@ void TileDataSource::addObjectToSmallIndex(const TileCoordinates& index, const O
 }
 
 void TileDataSource::addObjectToSmallIndexUnsafe(const TileCoordinates& index, const OutputObject& oo, uint64_t id) {
-	// Pick the z6 index
+	// addObjectToSmallIndexUnsafe differs from addObjectToSmallIndex in two ways:
+	// 1. We do no synchronization, either because the caller has already synchronized, or
+	//    because we know there will be no contention.
+	// 2. `index` is in terms of `indexZoom`, not `baseZoom`
+
+	// Pick the z6 index.
 	const size_t z6x = index.x / z6OffsetDivisor;
 	const size_t z6y = index.y / z6OffsetDivisor;
 	const size_t z6index = z6x * CLUSTER_ZOOM_WIDTH + z6y;
@@ -449,7 +462,7 @@ void TileDataSource::addGeometryToIndex(
 		insertIntermediateTiles(geom, baseZoom, tileSet);
 
 		bool polygonExists = false;
-		TileCoordinate minTileX = TILE_COORDINATE_MAX, maxTileX = 0, minTileY = TILE_COORDINATE_MAX, maxTileY = 0;
+		TileCoordinate minTileX = std::numeric_limits<TileCoordinate>::max(), maxTileX = 0, minTileY = std::numeric_limits<TileCoordinate>::max(), maxTileY = 0;
 		for (auto it = tileSet.begin(); it != tileSet.end(); ++it) {
 			TileCoordinates index = *it;
 			minTileX = std::min(index.x, minTileX);
@@ -526,7 +539,7 @@ void TileDataSource::addGeometryToIndex(
 		}
 	}
 	
-	TileCoordinate minTileX = TILE_COORDINATE_MAX, maxTileX = 0, minTileY = TILE_COORDINATE_MAX, maxTileY = 0;
+	TileCoordinate minTileX = std::numeric_limits<TileCoordinate>::max(), maxTileX = 0, minTileY = std::numeric_limits<TileCoordinate>::max(), maxTileY = 0;
 	for (auto it = tileSet.begin(); it != tileSet.end(); ++it) {
 		TileCoordinates index = *it;
 		minTileX = std::min(index.x, minTileX);

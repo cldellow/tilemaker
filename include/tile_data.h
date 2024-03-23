@@ -23,6 +23,14 @@ class TileBbox;
 #define CLUSTER_ZOOM_WIDTH (1 << CLUSTER_ZOOM)
 #define CLUSTER_ZOOM_AREA (CLUSTER_ZOOM_WIDTH * CLUSTER_ZOOM_WIDTH)
 
+// We track which base zoom tile contains the output object by reconstituting the
+// base zoom tile offset relative to the z6 tile.
+// When basezoom is >= 15, we truncate to z14. This means we'll get false positives
+// when looking up in the index (since, e.g., a single z14 tile covers 4 z15 tiles).
+// This is OK: when writing the z15 tile, there's a clipping step that will filter
+// out the false positives.
+typedef uint8_t Z6Offset;
+
 struct OutputObjectXY {
 	OutputObject oo;
 	Z6Offset x;
@@ -56,7 +64,6 @@ template<typename OO> void finalizeObjects(
 	typename std::vector<AppendVectorNS::AppendVector<OO>>::iterator end,
 	typename std::vector<std::vector<OO>>& lowZoom
 	) {
-	size_t z6OffsetDivisor = baseZoom >= CLUSTER_ZOOM ? (1 << (baseZoom - CLUSTER_ZOOM)) : 1;
 #ifdef CLOCK_MONOTONIC
 	timespec startTs, endTs;
 	clock_gettime(CLOCK_MONOTONIC, &startTs);
@@ -141,8 +148,9 @@ template<typename OO> void collectTilesWithObjectsAtZoomTemplate(
 	const size_t size,
 	std::vector<TileCoordinatesSet>& zooms
 ) {
-	size_t maxZoom = zooms.size() - 1;
-	uint16_t z6OffsetDivisor = baseZoom >= CLUSTER_ZOOM ? (1 << (baseZoom - CLUSTER_ZOOM)) : 1;
+	const size_t maxZoom = zooms.size() - 1;
+	const unsigned int indexZoom = baseZoom > 14 ? 14 : baseZoom;
+	uint16_t z6OffsetDivisor = indexZoom >= CLUSTER_ZOOM ? (1 << (indexZoom - CLUSTER_ZOOM)) : 1;
 	int64_t lastX = -1;
 	int64_t lastY = -1;
 	for (size_t i = 0; i < size; i++) {
@@ -150,7 +158,7 @@ template<typename OO> void collectTilesWithObjectsAtZoomTemplate(
 		const size_t z6y = i % CLUSTER_ZOOM_WIDTH;
 
 		for (size_t j = 0; j < objects[i].size(); j++) {
-			// Compute the x, y at the base zoom level
+			// Compute the x, y at the index zoom level
 			TileCoordinate baseX = z6x * z6OffsetDivisor + objects[i][j].x;
 			TileCoordinate baseY = z6y * z6OffsetDivisor + objects[i][j].y;
 
@@ -162,6 +170,7 @@ template<typename OO> void collectTilesWithObjectsAtZoomTemplate(
 				lastX = x;
 				lastY = y;
 
+				// Index 
 				for (int zoom = maxZoom; zoom >= 0; zoom--) {
 					zooms[zoom].set(x, y);
 					x /= 2;
@@ -333,7 +342,6 @@ protected:
 	uint8_t shardBits;
 	std::mutex mutex;
 	bool includeID;
-	uint16_t z6OffsetDivisor;
 
 	// Guards objects, objectsWithIds.
 	std::vector<std::mutex> objectsMutex;
@@ -355,6 +363,8 @@ protected:
 	boost::geometry::index::rtree< std::pair<Box,OutputObjectID>, oo_rtree_param_type> boxRtreeWithIds;
 
 	unsigned int baseZoom;
+	unsigned int indexZoom; // when base zoom >= 15, we clamp it to 14 for indexing
+	uint16_t z6OffsetDivisor;
 
 	std::vector<point_store_t> pointStores;
 	std::vector<linestring_store_t> linestringStores;
@@ -392,8 +402,7 @@ public:
 		const uint64_t id
 	);
 
-	void addObjectToSmallIndex(const TileCoordinates& index, const OutputObject& oo, uint64_t id);
-	void addObjectToSmallIndex(const TileCoordinates& index, const OutputObject& oo, uint64_t id, bool needsLock);
+	void addObjectToSmallIndex(TileCoordinates index, const OutputObject& oo, uint64_t id);
 	void addObjectToSmallIndexUnsafe(const TileCoordinates& index, const OutputObject& oo, uint64_t id);
 
 	void addObjectToLargeIndex(const Box& envelope, const OutputObject& oo, uint64_t id) {

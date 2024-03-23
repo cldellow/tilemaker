@@ -1,12 +1,12 @@
 {
 	"layers": {
-		"place":            { "minzoom":  0, "maxzoom": 14 },
+		"place":            { "minzoom":  0, "maxzoom": 15 },
 		"boundary":         { "minzoom":  0, "maxzoom": 14, "simplify_below": 12, "simplify_level": 0.0003, "simplify_ratio": 2 },
 
-		"poi":              { "minzoom": 12, "maxzoom": 14 },
-		"poi_detail":       { "minzoom": 14, "maxzoom": 14, "write_to": "poi"},
+		"poi":              { "minzoom": 12, "maxzoom": 15 },
+		"poi_detail":       { "minzoom": 14, "maxzoom": 15, "write_to": "poi"},
 
-		"housenumber":      { "minzoom": 14, "maxzoom": 14 },
+		"housenumber":      { "minzoom": 14, "maxzoom": 15 },
 
 		"waterway":         { "minzoom":  8,  "maxzoom": 14, "simplify_below": 12, "simplify_level": 0.0003, "simplify_ratio": 2 },
 		"waterway_detail":  { "minzoom": 12,  "maxzoom": 14, "write_to": "waterway" },
@@ -16,7 +16,7 @@
 		"transportation_name_mid":    { "minzoom": 12, "maxzoom": 14, "write_to": "transportation_name" },
 		"transportation_name_detail": { "minzoom": 14, "maxzoom": 14, "write_to": "transportation_name" },
 
-		"building":          { "minzoom": 13, "maxzoom": 14 },
+		"building":          { "minzoom": 13, "maxzoom": 15 },
 
 		"water":             { "minzoom": 6,  "maxzoom": 14, "simplify_below": 12, "simplify_level": 0.0003, "simplify_ratio": 2},
 		"ocean":             { "minzoom": 0,  "maxzoom": 14, "source": "coastline/water_polygons.shp", "filter_below": 12, "filter_area": 0.5, "simplify_below": 13, "simplify_level": 0.0001, "simplify_ratio": 2, "write_to": "water" },
@@ -35,8 +35,8 @@
 	},
 	"settings": {
 		"minzoom": 0,
-		"maxzoom": 14,
-		"basezoom": 14,
+		"maxzoom": 15,
+		"basezoom": 15,
 		"include_ids": false,
 		"combine_below": 14,
 		"name": "Tilemaker to OpenMapTiles schema",
