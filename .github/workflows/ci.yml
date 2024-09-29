@@ -2,7 +2,6 @@ name: "Continuous Integration"
 
 on:
   push:
-    branches: [ master ]
   pull_request:
 
 concurrency:
@@ -661,7 +660,7 @@ jobs:
     needs:
       - changes
       - static-validation
-    if: ${{ needs.changes.outputs.runtime == 'true' && github.ref != 'refs/heads/master' }}
+    if: false
     permissions:
       contents: read
 
@@ -742,7 +741,7 @@ jobs:
     needs:
       - changes
       - static-validation
-    if: ${{ needs.changes.outputs.runtime == 'true' && github.ref == 'refs/heads/master' }}
+    if: ${{ needs.changes.outputs.runtime == 'true' }}
     permissions:
       contents: read
       packages: write
@@ -805,7 +804,7 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
