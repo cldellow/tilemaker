@@ -2,7 +2,6 @@
 #ifndef _HELPERS_H
 #define _HELPERS_H
 
-#include <zlib.h>
 #include <sstream>
 #include <vector>
 
@@ -11,6 +10,8 @@
 #else
 #define ISATTY isatty(1)
 #endif
+
+#define Z_DEFAULT_COMPRESSION -1
 
 // General helper routines
 

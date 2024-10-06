@@ -9,11 +9,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libboost-program-options-dev \
     libboost-filesystem-dev \
     libboost-system-dev \
-    libboost-iostreams-dev \
     luarocks \
     rapidjson-dev \
-    cmake \
-    zlib1g-dev && \
+    cmake && \
     rm -rf /var/lib/apt/lists/* && \
     luarocks install luaflock
 
@@ -41,8 +39,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libsqlite3-0 \
     lua-sql-sqlite3 \
     libboost-filesystem1.74.0 \
-    libboost-program-options1.74.0 \
-    libboost-iostreams1.74.0 && \
+    libboost-program-options1.74.0 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
