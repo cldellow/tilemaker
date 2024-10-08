@@ -17,12 +17,11 @@ TileBbox::TileBbox(TileCoordinates i, uint z, bool h, bool e) {
 	maxLat = tiley2lat(i.y  ,zoom);
 	minLatp = lat2latp(minLat);
 	maxLatp = lat2latp(maxLat);
-	xmargin = (maxLon -minLon )/200.0;
-	ymargin = (maxLatp-minLatp)/200.0;
+
 	xscale  = (maxLon -minLon )/(hires ? 8192.0 : 4096.0);
 	yscale  = (maxLatp-minLatp)/(hires ? 8192.0 : 4096.0);
-	clippingBox = Box(geom::make<Point>(minLon-xmargin, minLatp-ymargin),
-		              geom::make<Point>(maxLon+xmargin, maxLatp+ymargin));
+	clippingBox = Box(geom::make<Point>(minLon, minLatp),
+		              geom::make<Point>(maxLon, maxLatp));
 }
 
 pair<int,int> TileBbox::scaleLatpLon(double latp, double lon) const {
