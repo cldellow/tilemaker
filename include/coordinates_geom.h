@@ -13,7 +13,7 @@ class TileBbox {
 
 public:
 	double minLon, maxLon, minLat, maxLat, minLatp, maxLatp;
-	double xmargin, ymargin, xscale, yscale;
+	double xscale, yscale;
 	TileCoordinates index;
 	uint zoom;
 	bool hires;
