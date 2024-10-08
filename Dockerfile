@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim AS src
+FROM debian:sid-slim AS src
 LABEL Description="Tilemaker" Version="1.4.0"
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -32,14 +32,14 @@ RUN mkdir build && \
 
 ENV PATH="/usr/src/app/build:$PATH"
 
-FROM debian:bookworm-slim
+FROM debian:sid-slim
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     liblua5.1-0 \
     shapelib \
     libsqlite3-0 \
-    libboost-filesystem1.74.0 \
-    libboost-program-options1.74.0 \
-    libboost-iostreams1.74.0 && \
+    libboost-filesystem1.83.0 \
+    libboost-program-options1.83.0 \
+    libboost-iostreams1.83.0 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/app
