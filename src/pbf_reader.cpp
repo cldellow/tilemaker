@@ -74,7 +74,7 @@ protozero::data_view PbfReader::PbfReader::readBlob(int32_t datasize, std::istre
 	if (input.eof())
 		throw std::runtime_error("readBlob: unexpected eof");
 
-	enum class BlobDataType { None, Raw, Zlib };
+	enum class BlobDataType { None, Raw, Zlib, Zstd };
 
 	int32_t rawSize = -1;
 	BlobDataType dataType = BlobDataType::None;
@@ -93,9 +93,12 @@ protozero::data_view PbfReader::PbfReader::readBlob(int32_t datasize, std::istre
 				dataType = BlobDataType::Zlib;
 				view = message.get_view();
 				break;
+			case Schema::Blob::oneof_data_bytes_zstd_data:
+				dataType = BlobDataType::Zstd;
+				view = message.get_view();
+				break;
 			case Schema::Blob::oneof_data_bytes_lzma_data:
 			case Schema::Blob::oneof_data_bytes_lz4_data:
-			case Schema::Blob::oneof_data_bytes_zstd_data:
 				throw std::runtime_error("Blob: unsupported compression tag: " + std::to_string(static_cast<uint32_t>(message.tag())));
 			default:
 				throw std::runtime_error("Blob: unknown tag: " + std::to_string(static_cast<uint32_t>(message.tag())));
@@ -109,6 +112,11 @@ protozero::data_view PbfReader::PbfReader::readBlob(int32_t datasize, std::istre
 		if (!copyRaw)
 			return view;
 		output.assign(view.data(), view.size());
+		return { output.data(), output.size() };
+	}
+
+	if (dataType == BlobDataType::Zstd) {
+		decompress_zstd(output, view.data(), view.size(), rawSize > 0 ? rawSize : 0);
 		return { output.data(), output.size() };
 	}
 

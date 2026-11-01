@@ -2,11 +2,12 @@
 #include <fstream>
 #include <sstream>
 #include "external/minunit.h"
+#include <protozero/pbf_writer.hpp>
+#include "helpers.h"
 #include "pbf_reader.h"
 
-MU_TEST(test_pbf_reader) {
-	std::ifstream monaco("test/monaco.pbf", std::ifstream::in);
-
+// Reads monaco.pbf (or a re-encoding of it) and checks its contents.
+void checkMonaco(std::istream& monaco) {
 	PbfReader::PbfReader reader;
 	PbfReader::BlobHeader bh = reader.readBlobHeader(monaco);
 	protozero::data_view blob = reader.readBlob(bh.datasize, monaco);
@@ -119,8 +120,56 @@ MU_TEST(test_pbf_reader) {
 	mu_check(relations == 285);
 }
 
+MU_TEST(test_pbf_reader) {
+	std::ifstream monaco("test/monaco.pbf", std::ifstream::in);
+	checkMonaco(monaco);
+}
+
+void writeBlobHeaderAndBlob(std::ostream& out, const std::string& type, const std::string& blob) {
+	std::string header;
+	protozero::pbf_writer headerWriter{header};
+	headerWriter.add_string(1, type); // type
+	headerWriter.add_int32(3, blob.size()); // datasize
+
+	unsigned int size = header.size();
+	endian_swap(size);
+	out.write((const char*)&size, sizeof(size));
+	out << header << blob;
+}
+
+MU_TEST(test_pbf_reader_zstd) {
+	// Re-encode monaco.pbf with zstd-compressed blobs, then read it back.
+	std::ifstream monaco("test/monaco.pbf", std::ifstream::in);
+	std::stringstream zstdPbf;
+	PbfReader::PbfReader reader;
+	std::string raw;
+	int blobs = 0;
+	while (true) {
+		PbfReader::BlobHeader bh = reader.readBlobHeader(monaco);
+		if (bh.type == "eof")
+			break;
+		protozero::data_view data = reader.readBlob(bh.datasize, monaco, raw, true);
+		std::string uncompressed(data.data(), data.size());
+
+		std::string blob;
+		protozero::pbf_writer blobWriter{blob};
+		// Leave out raw_size from one blob, which is allowed for zstd since the
+		// frame records its size.
+		if (blobs != 1)
+			blobWriter.add_int32(2, uncompressed.size()); // raw_size
+		blobWriter.add_bytes(7, compress_zstd(uncompressed)); // zstd_data
+		writeBlobHeaderAndBlob(zstdPbf, bh.type, blob);
+		blobs++;
+	}
+	mu_check(blobs == 7);
+
+	zstdPbf.seekg(0);
+	checkMonaco(zstdPbf);
+}
+
 MU_TEST_SUITE(test_suite_pbf_reader) {
 	MU_RUN_TEST(test_pbf_reader);
+	MU_RUN_TEST(test_pbf_reader_zstd);
 }
 
 int main() {
