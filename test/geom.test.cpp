@@ -69,12 +69,100 @@ MU_TEST(test_rect_clip_touch_from_inside) {
 	checkClip(sideNotch, Box(Point(0, 0), Point(10, 10)), 2, 72);
 }
 
+// The precheck may only answer true when is_valid does
+static void checkPrecheck(const MultiPolygon &mp, bool expected) {
+	const bool pre = multiPolygonDefinitelyValid(mp);
+	mu_check(pre == expected);
+	mu_check(!pre || geom::is_valid(mp));
+}
+
+MU_TEST(test_precheck_overlapping_bboxes) {
+	// An L and a square in its corner: bboxes overlap, interiors don't
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,2 10,2 2,10 2,10 0,0 0)),((4 4,4 8,8 8,8 4,4 4)))"), true);
+	// A polygon inside another's hole
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(2 2,8 2,8 8,2 8,2 2)),((4 4,4 6,6 6,6 4,4 4)))"), true);
+	// A polygon inside another's interior
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0)),((4 4,4 6,6 6,6 4,4 4)))"), false);
+	// Crossing polygons
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 4,4 4,4 0,0 0)),((2 2,2 6,6 6,6 2,2 2)))"), false);
+	// Touching at a vertex: valid, but too close to call
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,2 10,2 2,10 2,10 0,0 0)),((2 2,4 8,8 8,8 4,2 2)))"), false);
+}
+
+MU_TEST(test_precheck_many_holes) {
+	// 400 holes on a grid inside one square
+	Polygon p;
+	geom::read_wkt("POLYGON((0 0,0 100,100 100,100 0,0 0))", p);
+	for (int i = 0; i < 20; i++)
+		for (int j = 0; j < 20; j++) {
+			Ring hole;
+			const double x = 1 + i * 5, y = 1 + j * 5;
+			geom::append(hole, Point(x, y)); geom::append(hole, Point(x + 2, y));
+			geom::append(hole, Point(x + 2, y + 2)); geom::append(hole, Point(x, y + 2));
+			geom::append(hole, Point(x, y));
+			p.inners().push_back(hole);
+		}
+	MultiPolygon mp;
+	mp.push_back(p);
+	geom::correct(mp);
+	checkPrecheck(mp, true);
+	// Nest one hole inside another
+	Ring nested;
+	geom::append(nested, Point(1.5, 1.5)); geom::append(nested, Point(2.5, 1.5));
+	geom::append(nested, Point(2.5, 2.5)); geom::append(nested, Point(1.5, 2.5));
+	geom::append(nested, Point(1.5, 1.5));
+	mp[0].inners().push_back(nested);
+	geom::correct(mp);
+	checkPrecheck(mp, false);
+}
+
+static Ring squareRing(double x, double y, double size) {
+	Ring r;
+	geom::append(r, Point(x, y)); geom::append(r, Point(x + size, y));
+	geom::append(r, Point(x + size, y + size)); geom::append(r, Point(x, y + size));
+	geom::append(r, Point(x, y));
+	return r;
+}
+
+MU_TEST(test_precheck_large_polygon) {
+	// A 40000-vertex outer ring (a circle) with 3600 holes: far more than walking the
+	// outer ring for every hole would allow (the old 2^26 work cap)
+	Polygon p;
+	const int n = 40000;
+	for (int i = 0; i <= n; i++) {
+		const double a = 2 * M_PI * (i % n) / n;
+		geom::append(p.outer(), Point(100 + 100 * std::cos(a), 100 + 100 * std::sin(a)));
+	}
+	for (int i = 0; i < 60; i++)
+		for (int j = 0; j < 60; j++)
+			p.inners().push_back(squareRing(40 + i * 2, 40 + j * 2, 1));
+	MultiPolygon mp;
+	mp.push_back(p);
+	geom::correct(mp);
+	checkPrecheck(mp, true);
+
+	// A hole outside the outer ring
+	MultiPolygon outside = mp;
+	outside[0].inners().push_back(squareRing(300, 100, 1));
+	geom::correct(outside);
+	checkPrecheck(outside, false);
+
+	// A hole nested in a hole on the other side of the polygon
+	MultiPolygon nested = mp;
+	nested[0].inners().insert(nested[0].inners().begin(), squareRing(40.25, 40.25, 0.5));
+	geom::correct(nested);
+	checkPrecheck(nested, false);
+}
+
 MU_TEST_SUITE(test_suite_geom) {
 	MU_RUN_TEST(test_rect_clip_concave);
 	MU_RUN_TEST(test_rect_clip_holes);
 	MU_RUN_TEST(test_rect_clip_trivial);
 	MU_RUN_TEST(test_rect_clip_vertex_on_edge);
 	MU_RUN_TEST(test_rect_clip_touch_from_inside);
+	MU_RUN_TEST(test_precheck_overlapping_bboxes);
+	MU_RUN_TEST(test_precheck_many_holes);
+	MU_RUN_TEST(test_precheck_large_polygon);
 }
 
 int main() {
