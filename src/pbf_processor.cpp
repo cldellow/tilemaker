@@ -5,6 +5,8 @@
 #include <boost/asio/thread_pool.hpp>
 #include <boost/asio/post.hpp>
 #include <unordered_set>
+#include <chrono>
+#include <sstream>
 
 #include "node_store.h"
 #include "way_store.h"
@@ -372,8 +374,17 @@ bool PbfProcessor::ReadRelations(
 					readTags(pbfRelation, pb, tags);
 				}
 
-				if (osmStore.usedRelations.test(pbfRelation.id) || wayKeys.filter(tags))
+				if (osmStore.usedRelations.test(pbfRelation.id) || wayKeys.filter(tags)) {
+					// Debug: report relations that take long to process (id, ms, outer and inner ways)
+					auto start = std::chrono::steady_clock::now();
 					output.setRelation(pb.stringTable, pbfRelation, outerWayVec, innerWayVec, tags, isMultiPolygon, isInnerOuter);
+					double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+					if (ms >= 500) {
+						std::ostringstream m;
+						m << "RELSLOW " << shard << " " << pbfRelation.id << " " << (long)ms << " " << outerWayVec.size() << " " << innerWayVec.size() << (char)10;
+						std::cerr << m.str();
+					}
+				}
 
 			} catch (std::out_of_range &err) {
 				// Relation is missing a member?
