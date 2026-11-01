@@ -7,6 +7,7 @@
 
 #include "rapidjson/document.h"
 
+#include "helpers.h"
 #include "options_parser.h"
 #include "osm_store.h"
 #include "output_object.h"
@@ -87,7 +88,8 @@ public:
 	uint baseZoom, startZoom, endZoom;
 	TileFormat tileFormat;
 	uint mvtVersion, combineBelow;
-	bool includeID, compress, gzip, highResolution;
+	bool includeID, highResolution;
+	TileCompression compression;
 	std::string compressOpt;
 	bool clippingBoxFromJSON;
 	double minLon, minLat, maxLon, maxLat;

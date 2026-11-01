@@ -32,7 +32,7 @@ It also includes these global settings:
 * `maxzoom` - the maximum zoom level at which any tiles will be generated
 * `basezoom` - the zoom level for which tilemaker will generate tiles internally (should usually be the same as `maxzoom`)
 * `include_ids` - whether you want to store the OpenStreetMap IDs for each way/node within your vector tiles. This option is not compatible with the merging options defined by the `combine_xxx` settings (see the dedicated paragraph below)
-* `compress` - for mbtiles output, whether to compress vector tiles (Any of "gzip","deflate" or "none"(default)). For pmtiles output, compression is hardcoded to gzip
+* `compress` - for mbtiles and directory output, how to compress vector tiles (any of "gzip", "deflate", "zstd" or "none"). For pmtiles output, tiles are compressed with zstd if this is "zstd", and with gzip otherwise. Whatever reads the tiles must support the method you choose: tiles served over HTTP need a matching `Content-Encoding` header, and pmtiles.js only decompresses gzip unless you give it a decompression function.
 * `name`, `version` and `description` - about your project (these are written into the MBTiles file)
 * `high_resolution` (optional) - whether to use extra coordinate precision at the maximum zoom level (makes tiles a bit bigger)
 * `bounding_box` (optional) - the bounding box to output, in [minlon, minlat, maxlon, maxlat] order
