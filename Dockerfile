@@ -15,6 +15,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libboost-system-dev \
     luarocks \
     rapidjson-dev \
+    libzstd-dev \
     cmake \
     git \
     ca-certificates && \
@@ -60,6 +61,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     liblua5.1-0 \
     shapelib \
     libsqlite3-0 \
+    libzstd1 \
     lua-sql-sqlite3 \
     libboost-filesystem1.83.0 \
     libboost-program-options1.83.0 \

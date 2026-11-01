@@ -10,7 +10,7 @@
 				"minzoom": { "type": "integer", "minimum": 0 },
 				"maxzoom": { "type": "integer", "minimum": 0 },
 				"include_ids": { "type": "boolean" },
-				"compress": { "type": "string", "enum": ["gzip", "deflate", "none"] },
+				"compress": { "type": "string", "enum": ["gzip", "deflate", "zstd", "none"] },
 				"name": { "type": "string" },
 				"version": { "type": "string" },
 				"description": { "type": "string" },

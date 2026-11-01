@@ -10,6 +10,7 @@
 
 #include <sys/stat.h>
 #include "external/libdeflate/libdeflate.h"
+#include <zstd.h>
 #include "helpers.h"
 
 #ifdef _MSC_VER
@@ -74,6 +75,30 @@ public:
 
 thread_local Compressor compressor(6);
 thread_local Decompressor decompressor;
+
+// zstd contexts are expensive to create, so keep one of each per thread.
+struct ZstdContexts {
+	ZSTD_CCtx* cctx = nullptr;
+	ZSTD_DCtx* dctx = nullptr;
+	ZstdContexts() = default;
+	ZstdContexts(const ZstdContexts&) = delete;
+	ZstdContexts& operator=(const ZstdContexts&) = delete;
+	~ZstdContexts() {
+		ZSTD_freeCCtx(cctx);
+		ZSTD_freeDCtx(dctx);
+	}
+	ZSTD_CCtx* compressor() {
+		if (!cctx && !(cctx = ZSTD_createCCtx()))
+			throw std::runtime_error("ZSTD_createCCtx failed");
+		return cctx;
+	}
+	ZSTD_DCtx* decompressor() {
+		if (!dctx && !(dctx = ZSTD_createDCtx()))
+			throw std::runtime_error("ZSTD_createDCtx failed");
+		return dctx;
+	}
+};
+thread_local ZstdContexts zstdContexts;
 
 // Bounding box string parsing
 
@@ -175,6 +200,80 @@ void decompress_string(std::string& output, const char* input, uint32_t inputSiz
 	}
 }
 
+
+std::string compress_zstd(const std::string& str, int compressionlevel) {
+	if (compressionlevel == 0)
+		compressionlevel = ZSTD_CLEVEL_DEFAULT;
+
+	std::string rv;
+	rv.resize(ZSTD_compressBound(str.size()));
+	size_t compressedSize = ZSTD_compressCCtx(zstdContexts.compressor(), &rv[0], rv.size(), str.data(), str.size(), compressionlevel);
+	if (ZSTD_isError(compressedSize))
+		throw std::runtime_error(std::string("ZSTD_compress failed: ") + ZSTD_getErrorName(compressedSize));
+	rv.resize(compressedSize);
+	return rv;
+}
+
+void decompress_zstd(std::string& output, const char* input, size_t inputSize, size_t expectedSize) {
+	size_t size = expectedSize;
+	if (size == 0) {
+		unsigned long long frameSize = ZSTD_getFrameContentSize(input, inputSize);
+		if (frameSize == ZSTD_CONTENTSIZE_ERROR)
+			throw std::runtime_error("ZSTD_decompress failed: not zstd data");
+		if (frameSize != ZSTD_CONTENTSIZE_UNKNOWN)
+			size = frameSize;
+	}
+
+	if (size != 0) {
+		output.resize(size);
+		size_t rv = ZSTD_decompressDCtx(zstdContexts.decompressor(), &output[0], output.size(), input, inputSize);
+		if (ZSTD_isError(rv))
+			throw std::runtime_error(std::string("ZSTD_decompress failed: ") + ZSTD_getErrorName(rv));
+		output.resize(rv);
+		return;
+	}
+
+	// The frame doesn't record its size (e.g. it was written by a streaming
+	// compressor), so decompress it as a stream.
+	ZSTD_DCtx* dctx = zstdContexts.decompressor();
+	ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);
+	output.clear();
+	std::string chunk(ZSTD_DStreamOutSize(), '\0');
+	ZSTD_inBuffer in = { input, inputSize, 0 };
+	while (true) {
+		ZSTD_outBuffer out = { &chunk[0], chunk.size(), 0 };
+		size_t rv = ZSTD_decompressStream(dctx, &out, &in);
+		if (ZSTD_isError(rv))
+			throw std::runtime_error(std::string("ZSTD_decompress failed: ") + ZSTD_getErrorName(rv));
+		output.append(chunk.data(), out.pos);
+		// 0 means a frame just ended; input may hold further frames.
+		if (rv == 0 && in.pos == in.size)
+			return;
+		// zstd wants more input than there is
+		if (in.pos == in.size && out.pos < out.size)
+			throw std::runtime_error("ZSTD_decompress failed: truncated input");
+	}
+}
+
+std::string compress_tile(const std::string& str, TileCompression compression) {
+	switch (compression) {
+		case TileCompression::None:    return str;
+		case TileCompression::Gzip:    return compress_string(str, Z_DEFAULT_COMPRESSION, true);
+		case TileCompression::Deflate: return compress_string(str, Z_DEFAULT_COMPRESSION, false);
+		case TileCompression::Zstd:    return compress_zstd(str);
+	}
+	throw std::runtime_error("compress_tile: unknown compression");
+}
+
+void decompress_tile(std::string& output, const char* input, size_t inputSize, TileCompression compression) {
+	switch (compression) {
+		case TileCompression::None:    output.assign(input, inputSize); return;
+		case TileCompression::Gzip:    decompress_string(output, input, inputSize, true); return;
+		case TileCompression::Deflate: decompress_string(output, input, inputSize, false); return;
+		case TileCompression::Zstd:    decompress_zstd(output, input, inputSize); return;
+	}
+	throw std::runtime_error("decompress_tile: unknown compression");
+}
 
 // Parse a Boost error
 std::string boost_validity_error(unsigned failure) {

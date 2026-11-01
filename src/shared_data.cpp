@@ -68,8 +68,12 @@ void SharedData::writeMBTilesMetadata(rapidjson::Document const &jsonConfig) {
 }
 
 void SharedData::writeFileMetadata(rapidjson::Document const &jsonConfig) {
-	if(config.compress) 
+	if (config.compression == TileCompression::Gzip)
 		std::cout << "When serving compressed tiles, make sure to include 'Content-Encoding: gzip' in your webserver configuration for serving pbf files"  << std::endl;
+	else if (config.compression == TileCompression::Deflate)
+		std::cout << "When serving compressed tiles, make sure to include 'Content-Encoding: deflate' in your webserver configuration for serving pbf files"  << std::endl;
+	else if (config.compression == TileCompression::Zstd)
+		std::cout << "When serving compressed tiles, make sure to include 'Content-Encoding: zstd' in your webserver configuration for serving pbf files"  << std::endl;
 
 	rapidjson::Document document;
 	document.SetObject();
@@ -233,7 +237,8 @@ std::string LayerDefinition::serialiseToJSON() const {
 // *****************************************************************
 
 Config::Config() {
-	includeID = false, compress = true, gzip = true, highResolution = false;
+	includeID = false, highResolution = false;
+	compression = TileCompression::Gzip;
 	clippingBoxFromJSON = false;
 	baseZoom = 0;
 	combineBelow = 0;
@@ -260,7 +265,7 @@ void Config::readConfig(rapidjson::Document &jsonConfig, bool &hasClippingBox, B
 	includeID      = jsonConfig["settings"]["include_ids"].GetBool();
 	highResolution = jsonConfig["settings"].HasMember("high_resolution") && jsonConfig["settings"]["high_resolution"].GetBool();
 	if (! jsonConfig["settings"]["compress"].IsString()) {
-		cerr << "\"compress\" should be any of \"gzip\",\"deflate\",\"none\" in JSON file." << endl;
+		cerr << "\"compress\" should be any of \"gzip\",\"deflate\",\"zstd\",\"none\" in JSON file." << endl;
 		exit (EXIT_FAILURE);
 	}
 	if (endZoom>15) {
@@ -314,11 +319,12 @@ void Config::readConfig(rapidjson::Document &jsonConfig, bool &hasClippingBox, B
 	// Check config is valid
 	if (endZoom > baseZoom) { cerr << "maxzoom must be the same or smaller than basezoom." << endl; exit (EXIT_FAILURE); }
 	if (! compressOpt.empty()) {
-		if      (compressOpt == "gzip"   ) { gzip = true;  }
-		else if (compressOpt == "deflate") { gzip = false; }
-		else if (compressOpt == "none"   ) { compress = false; }
+		if      (compressOpt == "gzip"   ) { compression = TileCompression::Gzip; }
+		else if (compressOpt == "deflate") { compression = TileCompression::Deflate; }
+		else if (compressOpt == "zstd"   ) { compression = TileCompression::Zstd; }
+		else if (compressOpt == "none"   ) { compression = TileCompression::None; }
 		else {
-			cerr << "\"compress\" should be any of \"gzip\",\"deflate\",\"none\" in JSON file." << endl;
+			cerr << "\"compress\" should be any of \"gzip\",\"deflate\",\"zstd\",\"none\" in JSON file." << endl;
 			exit (EXIT_FAILURE);
 		}
 	}

@@ -391,6 +391,9 @@ int main(const int argc, const char* argv[]) {
 	} else if (sharedData.outputMode == OptionsParser::OutputMode::PMTiles) {
 		sharedData.pmtiles.open(sharedData.outputFile);
 		if (config.tileFormat == TileFormat::MLT) sharedData.pmtiles.tileType = TILETYPE_MLT;
+		// PMTiles has no "deflate" and tilemaker has always gzipped .pmtiles
+		// tiles, even with "compress": "none"; only "zstd" changes that.
+		if (config.compression == TileCompression::Zstd) sharedData.pmtiles.tileCompression = TileCompression::Zstd;
 	}
 
 	// ----	Write out data

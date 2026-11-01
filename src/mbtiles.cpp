@@ -146,7 +146,7 @@ vector<char> MBTiles::readTile(int zoom, int col, int row) {
 	return pbfBlob;
 }
 
-bool MBTiles::readTileAndUncompress(string &data, int zoom, int x, int y, bool isCompressed, bool asGzip) {
+bool MBTiles::readTileAndUncompress(string &data, int zoom, int x, int y, TileCompression compression) {
 	m.lock();
 	int tmsY = pow(2,zoom) - 1 - y;
 	int exists=0;
@@ -159,13 +159,8 @@ bool MBTiles::readTileAndUncompress(string &data, int zoom, int x, int y, bool i
 	db << "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?" << zoom << x << tmsY >> compressed;
 	m.unlock();
 
-	if (!isCompressed) {
-		data = std::string(compressed.data(), compressed.size());
-		return true;
-	}
-
 	try {
-		decompress_string(data, compressed.data(), compressed.size(), asGzip);
+		decompress_tile(data, compressed.data(), compressed.size(), compression);
 		return true;
 	} catch(std::runtime_error &e) {
 		return false;

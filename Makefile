@@ -89,7 +89,7 @@ CFLAGS ?= -O3 -Wall -Wno-unknown-pragmas -Wno-sign-compare -std=c99 -fPIE -DTM_V
 DEPFLAGS := -MD -MP
 DEPS := $(wildcard src/*.d src/external/*.d src/external/libdeflate/lib/*.d src/external/libdeflate/lib/*/*.d server/*.d test/*.d)
 BOOST_SYSTEM_LIB := $(shell printf 'int main(){return 0;}\n' | $(CXX) -x c++ - -o /tmp/tilemaker-boost-system-check -lboost_system >/dev/null 2>&1 && echo -lboost_system; rm -f /tmp/tilemaker-boost-system-check)
-LIB := -L$(PLATFORM_PATH)/lib -Wl,-rpath,$(PLATFORM_PATH)/lib $(LUA_LIBS) -lboost_program_options -lsqlite3 -lboost_filesystem $(BOOST_SYSTEM_LIB) -lshp -pthread
+LIB := -L$(PLATFORM_PATH)/lib -Wl,-rpath,$(PLATFORM_PATH)/lib $(LUA_LIBS) -lboost_program_options -lsqlite3 -lboost_filesystem $(BOOST_SYSTEM_LIB) -lshp -lzstd -pthread
 INC := -I$(PLATFORM_PATH)/include -isystem ./include -I./src $(LUA_CFLAGS)
 
 # Targets

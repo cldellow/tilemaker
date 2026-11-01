@@ -74,7 +74,7 @@ void PMTiles::close(std::string &metadata) {
 	header.tile_contents_count = numTilesWritten;
 	header.clustered = false;
 	header.internal_compression = pmtiles::COMPRESSION_GZIP;
-	header.tile_compression = pmtiles::COMPRESSION_GZIP;
+	header.tile_compression = tileCompression == TileCompression::Zstd ? pmtiles::COMPRESSION_ZSTD : pmtiles::COMPRESSION_GZIP;
 	header.tile_type = tileType;
 
 	// write header
@@ -131,7 +131,7 @@ void PMTiles::flushEntries(std::vector<pmtiles::entryv3> &rootEntries, std::vect
 
 // Write a tile to file and store it in the index
 // - if the tile is small and has already been written, reuse that instead
-// - we're a bit fussy about mutexs because compress_string is expensive
+// - we're a bit fussy about mutexs because compression is expensive
 void PMTiles::saveTile(int zoom, int x, int y, std::string &data) {
 	TileOffset offset;
 	bool isNew = false;
@@ -146,7 +146,7 @@ void PMTiles::saveTile(int zoom, int x, int y, std::string &data) {
 	// otherwise, compress it and write
 	} else {
 		indexLock1.unlock();
-		std::string compressed = compress_string(data, Z_DEFAULT_COMPRESSION, true);
+		std::string compressed = compress_tile(data, tileCompression);
 		std::lock_guard<std::mutex> lock(fileMutex);
 		// write to file
 		offset = TileOffset(static_cast<uint64_t>(outputStream.tellp()) - HEADER_ROOT, compressed.size());

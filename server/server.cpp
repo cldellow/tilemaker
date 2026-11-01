@@ -87,7 +87,14 @@ int main(int argc, char* argv[]) {
         db << "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?" << zoom << col << tmsY >> pbfBlob;
         std::string outStr(pbfBlob.begin(), pbfBlob.end());
         SimpleWeb::CaseInsensitiveMultimap header;
-        header.emplace("Content-Encoding", "gzip");
+        // The "compress" setting isn't recorded in the .mbtiles, so tell from the data
+        const unsigned char* b = reinterpret_cast<const unsigned char*>(outStr.data());
+        if (outStr.size() >= 2 && b[0] == 0x1f && b[1] == 0x8b)
+            header.emplace("Content-Encoding", "gzip");
+        else if (outStr.size() >= 4 && b[0] == 0x28 && b[1] == 0xb5 && b[2] == 0x2f && b[3] == 0xfd)
+            header.emplace("Content-Encoding", "zstd");
+        else if (outStr.size() >= 2 && (b[0] & 0x0f) == 8 && ((b[0] << 8) | b[1]) % 31 == 0)
+            header.emplace("Content-Encoding", "deflate"); // zlib header
         header.emplace("Access-Control-Allow-Origin", "*");
         response->write(outStr,header);
     };

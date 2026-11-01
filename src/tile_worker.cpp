@@ -595,8 +595,8 @@ void outputProc(
 			ProcessLayer<MltBackend>(sources, attributeStore, coordinates, zoom, data, layer, bbox, *lt, sharedData);
 			if (!layer.layer.features.empty()) layers.push_back(std::move(layer.layer));
 		}
-		// .pmtiles output is always gzipped
-		const bool compressed = sharedData.config.compress || sharedData.outputMode == OptionsParser::OutputMode::PMTiles;
+		// .pmtiles output is always compressed
+		const bool compressed = sharedData.config.compression != TileCompression::None || sharedData.outputMode == OptionsParser::OutputMode::PMTiles;
 		encodeMltTile(layers, sharedData.config.includeID, compressed, outputdata);
 	} else
 #endif
@@ -606,7 +606,7 @@ void outputProc(
 		// Read existing tile if merging
 		std::string rawExistingTile;
 		if (sharedData.mergeSqlite) {
-			sharedData.mbtiles.readTileAndUncompress(rawExistingTile, zoom, bbox.index.x, bbox.index.y, sharedData.config.compress, sharedData.config.gzip);
+			sharedData.mbtiles.readTileAndUncompress(rawExistingTile, zoom, bbox.index.x, bbox.index.y, sharedData.config.compression);
 		}
 		vtzero::vector_tile existingTile{rawExistingTile};
 
@@ -625,8 +625,9 @@ void outputProc(
 	// Write to file or sqlite
 	if (sharedData.outputMode == OptionsParser::OutputMode::MBTiles) {
 		// Write to sqlite
-		if (sharedData.config.compress) { compressed = compress_string(outputdata, Z_DEFAULT_COMPRESSION, sharedData.config.gzip); }
-		sharedData.mbtiles.saveTile(zoom, bbox.index.x, bbox.index.y, sharedData.config.compress ? &compressed : &outputdata, sharedData.mergeSqlite);
+		const bool isCompressed = sharedData.config.compression != TileCompression::None;
+		if (isCompressed) { compressed = compress_tile(outputdata, sharedData.config.compression); }
+		sharedData.mbtiles.saveTile(zoom, bbox.index.x, bbox.index.y, isCompressed ? &compressed : &outputdata, sharedData.mergeSqlite);
 
 	} else if (sharedData.outputMode == OptionsParser::OutputMode::PMTiles) {
 		// Write to pmtiles
@@ -640,11 +641,7 @@ void outputProc(
 		         << (sharedData.config.tileFormat == TileFormat::MLT ? ".mlt" : ".pbf");
 		boost::filesystem::create_directories(dirname.str());
 		fstream outfile(filename.str(), ios::out | ios::trunc | ios::binary);
-		if (sharedData.config.compress) {
-			outfile << compress_string(outputdata, Z_DEFAULT_COMPRESSION, sharedData.config.gzip);
-		} else {
-			outfile << outputdata;
-		}
+		outfile << compress_tile(outputdata, sharedData.config.compression);
 		outfile.close();
 	}
 }

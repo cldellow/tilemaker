@@ -10,6 +10,9 @@
 
 #define Z_DEFAULT_COMPRESSION -1
 
+// How vector tiles are compressed (the "compress" setting)
+enum class TileCompression { None, Gzip, Deflate, Zstd };
+
 #ifdef _MSVC_LANG
 #define ISATTY true
 #else
@@ -64,6 +67,17 @@ std::vector<std::string> parseBox(const std::string& bbox);
 std::string compress_string(const std::string& str,
                             int compressionlevel = Z_DEFAULT_COMPRESSION,
                             bool asGzip = false);
+
+// Zstandard. A level of 0 means zstd's default (currently 3).
+std::string compress_zstd(const std::string& str, int compressionlevel = 0);
+// expectedSize, if known (e.g. a PBF blob's raw_size), avoids reading it from
+// the frame header and growing the buffer.
+void decompress_zstd(std::string& output, const char* input, size_t inputSize, size_t expectedSize = 0);
+
+// Compress or decompress a tile with the configured method. TileCompression::None
+// passes the data through.
+std::string compress_tile(const std::string& str, TileCompression compression);
+void decompress_tile(std::string& output, const char* input, size_t inputSize, TileCompression compression);
 
 std::string boost_validity_error(unsigned failure);
 

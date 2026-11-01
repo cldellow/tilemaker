@@ -60,6 +60,8 @@ find_package(libshp REQUIRED)
 
 find_package(Rapidjson REQUIRED)
 
+find_package(zstd REQUIRED)
+
 find_package(Lua)
 
 if(LUA_FOUND)
@@ -225,6 +227,7 @@ target_link_libraries(tilemaker
 		shapelib::shp
 		SQLite::SQLite3
 		Rapidjson::rapidjson
+		zstd::libzstd
 		Boost::filesystem Boost::program_options)
 if(BOOST_HAS_SYSTEM)
 	target_link_libraries(tilemaker Boost::system)

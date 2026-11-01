@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include "external/pmtiles.hpp"
+#include "helpers.h"
 
 struct TileOffset {
 	uint64_t offset : 40;
@@ -37,6 +38,8 @@ public:
 	pmtiles::headerv3 header;
 	bool isSparse = true;
 	uint8_t tileType = pmtiles::TILETYPE_MVT;
+	// gzip or zstd: the only tile compressions PMTiles defines that tilemaker writes
+	TileCompression tileCompression = TileCompression::Gzip;
 
 	void open(std::string &filename);
 	void saveTile(int zoom, int x, int y, std::string &data);
