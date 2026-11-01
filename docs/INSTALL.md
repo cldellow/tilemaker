@@ -4,7 +4,7 @@
 
 Install all dependencies with Homebrew:
 
-    brew install boost lua shapelib rapidjson
+    brew install boost lua shapelib rapidjson zstd
 
 Then:
 
@@ -17,7 +17,7 @@ Then:
 
 Start with:
 
-    sudo apt install build-essential libboost-dev libboost-filesystem-dev libboost-program-options-dev libboost-system-dev lua5.3 liblua5.3-dev libshp-dev libsqlite3-dev rapidjson-dev
+    sudo apt install build-essential libboost-dev libboost-filesystem-dev libboost-program-options-dev libboost-system-dev lua5.3 liblua5.3-dev libshp-dev libsqlite3-dev rapidjson-dev libzstd-dev
 
 Once you've installed those, then `cd` back to your Tilemaker directory and simply:
 
@@ -30,7 +30,7 @@ If it fails, check that the LIB and INC lines in the Makefile correspond with yo
 
 Start with:
 
-    dnf install lua-devel luajit-devel sqlite-devel shapelib-devel rapidjson-devel boost-devel
+    dnf install lua-devel luajit-devel sqlite-devel shapelib-devel rapidjson-devel boost-devel libzstd-devel
 
 then build either with lua:
 
