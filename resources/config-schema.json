@@ -54,6 +54,7 @@
 					"minzoom": { "type": "integer", "minimum": 0 },
 					"maxzoom": { "type": "integer", "minimum": 0 },
 					"write_to": { "type": "string" },
+					"outline_of": { "type": "string" },
 					"simplify_below": { "type": "integer", "minimum": 0 },
 					"simplify_level": { "type": "number" },
 					"simplify_length": { "type": "number" },

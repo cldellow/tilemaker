@@ -389,8 +389,19 @@ void Config::readConfig(rapidjson::Document &jsonConfig, bool &hasClippingBox, B
 			if (it->value.HasMember("declutter_threshold")) layerDef.declutterThreshold = it->value["declutter_threshold"].GetDouble();
 		}
 
+		// Outlines of another layer's polygons, e.g. park boundaries for styling.
+		if (it->value.HasMember("outline_of")) {
+			string of = it->value["outline_of"].GetString();
+			if (layers.layerMap.count(of) == 0 || of == layerName) {
+				cerr << "ERROR: outline_of in layer " << layerName << ": the layer \"" << of << "\" must be declared before it." << endl;
+				exit(1);
+			}
+			layers.layers[layerNum].outlineOf = layers.layerMap[of];
+		}
+
 		cout << "Layer " << layerName << " (z" << minZoom << "-" << maxZoom << ")";
 		if (it->value.HasMember("write_to")) { cout << " -> " << it->value["write_to"].GetString(); }
+		if (it->value.HasMember("outline_of")) { cout << " outlines " << it->value["outline_of"].GetString(); }
 		cout << endl;
 	}
 }

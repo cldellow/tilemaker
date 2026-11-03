@@ -239,18 +239,15 @@ bool writeRing(
 }
 
 
-template<class Backend>
-void writeMultiPolygon(
-	const AttributeStore& attributeStore,
-	const SharedData& sharedData,
-	typename Backend::LayerBuilder& vtLayer,
+// Scale a clipped multipolygon to tile coordinates, simplify it and make it
+// valid, ready to write. The result is left in scaledMultiPolygon; returns
+// false if nothing is left of it.
+static bool preparePolygons(
 	const TileBbox& bbox,
-	const OutputObjectID& oo,
 	unsigned zoom,
 	double simplifyLevel,
 	unsigned simplifyAlgo,
-	const MultiPolygon& mp,
-	MvtAttributeMemo* attrMemo
+	const MultiPolygon& mp
 ) {
 	bbox.scaleGeometry(scaledMultiPolygon, mp);
 	MultiPolygon &current = scaledMultiPolygon;
@@ -279,7 +276,7 @@ void writeMultiPolygon(
 		}
 	}
 	if (geom::is_empty(current))
-		return;
+		return false;
 
 	geom::correct(current);
 
@@ -302,7 +299,7 @@ void writeMultiPolygon(
 			bool repaired = repair_multi_polygon(current, true); // already known invalid
 
 			if (geom::is_empty(current))
-				return;
+				return false;
 
 			if (verbose && !repaired) {
 				geom::validity_failure_type postFailure;
@@ -311,6 +308,26 @@ void writeMultiPolygon(
 			}
 		}
 	}
+
+	return true;
+}
+
+template<class Backend>
+void writeMultiPolygon(
+	const AttributeStore& attributeStore,
+	const SharedData& sharedData,
+	typename Backend::LayerBuilder& vtLayer,
+	const TileBbox& bbox,
+	const OutputObjectID& oo,
+	unsigned zoom,
+	double simplifyLevel,
+	unsigned simplifyAlgo,
+	const MultiPolygon& mp,
+	MvtAttributeMemo* attrMemo
+) {
+	if (!preparePolygons(bbox, zoom, simplifyLevel, simplifyAlgo, mp))
+		return;
+	MultiPolygon &current = scaledMultiPolygon;
 
 	typename Backend::PolygonFeature fbuilder{vtLayer};
 
@@ -338,6 +355,129 @@ void writeMultiPolygon(
 		oo.oo.writeAttributes(attributeStore, fbuilder, zoom, attrMemo);
 		// call commit() when you are done
 		fbuilder.commit();
+	}
+}
+
+// Write the boundaries of a polygon's rings as lines (see outline_of), in the
+// same point order writeRing uses, so the polygon is on each line's right:
+// a style can offset a line into the polygon. Segments that lie on or beyond
+// one tile edge are dropped: they're where clipping cut the polygon, not its
+// boundary, and drawing them would outline every tile.
+template<class Backend>
+void writeOutline(
+	const AttributeStore& attributeStore,
+	const SharedData& sharedData,
+	typename Backend::LayerBuilder& vtLayer,
+	const TileBbox& bbox,
+	const OutputObjectID& oo,
+	unsigned zoom,
+	double simplifyLevel,
+	unsigned simplifyAlgo,
+	const MultiPolygon& mp,
+	MvtAttributeMemo* attrMemo
+) {
+	if (!preparePolygons(bbox, zoom, simplifyLevel, simplifyAlgo, mp))
+		return;
+	const int extent = bbox.hires ? 8192 : 4096;
+	typedef std::pair<int, int> XY;
+	auto onTileEdge = [extent](const XY& a, const XY& b) {
+		return (a.first <= 0 && b.first <= 0) || (a.first >= extent && b.first >= extent) ||
+		       (a.second <= 0 && b.second <= 0) || (a.second >= extent && b.second >= extent);
+	};
+
+	std::vector<std::vector<XY>> lines;
+	auto addRing = [&](const Ring& ring) {
+		// The ring's points as written, without repeats; closed (first == last).
+		std::vector<XY> pts;
+		for (auto it = ring.rbegin(); it != ring.rend(); ++it) {
+			XY xy = std::make_pair((int)it->get<0>(), (int)it->get<1>());
+			if (pts.empty() || xy != pts.back()) pts.push_back(xy);
+		}
+		if (pts.size() < 4) return;
+		if (pts.front() != pts.back()) pts.push_back(pts.front());
+		const size_t n = pts.size() - 1; // segments
+		// Start just after a tile-edge segment, so a line isn't split where the
+		// ring happens to start.
+		size_t start = 0;
+		bool cut = false;
+		for (size_t i = 0; i < n; i++) if (onTileEdge(pts[i], pts[i + 1])) { start = (i + 1) % n; cut = true; break; }
+		if (!cut) { lines.push_back(pts); return; } // all boundary: one closed line
+		std::vector<XY> line;
+		for (size_t k = 0; k < n; k++) {
+			const size_t i = (start + k) % n;
+			const XY &a = pts[i], &b = pts[i + 1];
+			if (onTileEdge(a, b)) {
+				if (line.size() >= 2) lines.push_back(line);
+				line.clear();
+				continue;
+			}
+			if (line.empty()) line.push_back(a);
+			line.push_back(b);
+		}
+		if (line.size() >= 2) lines.push_back(line);
+	};
+	for (const auto& p : scaledMultiPolygon) {
+		addRing(geom::exterior_ring(p));
+		for (const Ring& ring : geom::interior_rings(p)) addRing(ring);
+	}
+	if (lines.empty())
+		return;
+
+	typename Backend::LinestringFeature fbuilder{vtLayer};
+	if (sharedData.config.includeID && oo.id)
+		fbuilder.set_id(oo.id);
+	for (const auto& line : lines) {
+		fbuilder.add_linestring(line.size());
+		for (const XY& xy : line) fbuilder.set_point(xy.first, xy.second);
+	}
+	oo.oo.writeAttributes(attributeStore, fbuilder, zoom, attrMemo);
+	fbuilder.commit();
+}
+
+// The outline_of counterpart of ProcessObjects: the polygons of the source
+// layer, prepared as that layer writes them, written as outlines.
+template<class Backend>
+void ProcessOutlines(
+	TileDataSource* source,
+	const AttributeStore& attributeStore,
+	OutputObjectsConstIt ooBegin,
+	OutputObjectsConstIt ooEnd,
+	class SharedData& sharedData,
+	double simplifyLevel,
+	unsigned simplifyAlgo,
+	double filterArea,
+	bool combinePolygons,
+	unsigned zoom,
+	const TileBbox &bbox,
+	typename Backend::LayerBuilder& vtLayer,
+	MvtAttributeMemo* attrMemo
+) {
+	for (auto jt = ooBegin; jt != ooEnd; ++jt) {
+		OutputObjectID oo = *jt;
+		if (zoom < oo.oo.minZoom || oo.oo.geomType != POLYGON_) continue;
+		Geometry g;
+		try {
+			g = source->buildWayGeometry(oo.oo.geomType, oo.oo.objectID, bbox);
+		} catch (std::out_of_range &err) {
+			continue;
+		}
+		if (combinePolygons) {
+			std::vector<MultiPolygon> mps;
+			while (jt<(ooEnd-1) && oo.oo.compatible((jt+1)->oo)) {
+				jt++;
+				mps.emplace_back( boost::get<MultiPolygon>(source->buildWayGeometry(jt->oo.geomType, jt->oo.objectID, bbox)) );
+			}
+			if (!mps.empty()) {
+				mps.emplace_back(boost::get<MultiPolygon>(g));
+				union_many(mps); g = mps.front();
+			}
+			oo = *jt;
+		}
+		if (filterArea > 0.0) {
+			RemovePartsBelowSize(boost::get<MultiPolygon>(g), filterArea);
+			if (geom::is_empty(g)) continue;
+		}
+		writeOutline<Backend>(attributeStore, sharedData, vtLayer, bbox, oo, zoom, simplifyLevel, simplifyAlgo, boost::get<MultiPolygon>(g), attrMemo);
 	}
 }
 
@@ -521,6 +661,29 @@ void ProcessLayer(
 		uint layerNum = *mt;
 		const LayerDef &ld = sharedData.layers.layers[layerNum];
 		if (zoom<ld.minzoom || zoom>ld.maxzoom) { continue; }
+
+		// An outline_of layer writes another layer's polygons as outlines, so
+		// prepare them with that layer's settings, to match what it draws.
+		if (ld.outlineOf >= 0) {
+			const LayerDef &sd = sharedData.layers.layers[ld.outlineOf];
+			if (zoom<sd.minzoom || zoom>sd.maxzoom) { continue; }
+			double sLevel = 0.0, sArea = 0.0, sLatp = 0.0;
+			if (zoom < sd.simplifyBelow || zoom < sd.filterBelow)
+				sLatp = (tiley2latp(tileY, zoom) + tiley2latp(tileY+1, zoom)) / 2;
+			if (zoom < sd.simplifyBelow) {
+				sLevel = sd.simplifyLength > 0 ? meter2degp(sd.simplifyLength, sLatp) : sd.simplifyLevel;
+				sLevel *= pow(sd.simplifyRatio, (sd.simplifyBelow-1) - zoom);
+			}
+			if (zoom < sd.filterBelow)
+				sArea = meter2degp(sd.filterArea, sLatp) * pow(2.0, (sd.filterBelow-1) - zoom);
+			for (size_t i=0; i<sources.size(); i++) {
+				auto oos = getObjectsAtSubLayer(data[i], ld.outlineOf);
+				ProcessOutlines<Backend>(sources[i], attributeStore, oos.first, oos.second, sharedData,
+					sLevel, sd.simplifyAlgo, sArea, zoom < sd.combinePolygonsBelow, zoom, bbox, vtLayer, attrMemo);
+			}
+			continue;
+		}
+
 		double simplifyLevel = 0.0, filterArea = 0.0, latp = 0.0;
 		if (zoom < ld.simplifyBelow || zoom < ld.filterBelow) {
 			latp = (tiley2latp(tileY, zoom) + tiley2latp(tileY+1, zoom)) / 2;

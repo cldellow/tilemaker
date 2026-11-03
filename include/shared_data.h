@@ -44,6 +44,9 @@ struct LayerDef {
 	uint declutterBelow = 0;			// zoom below which point features are thinned out by Score()
 	double declutterDistance = 40;		// how far apart (in 256px screen pixels) they should be kept
 	double declutterThreshold = 0;		// score needed at the layer's minzoom (halves at each zoom)
+	// If set, this layer gets the boundaries of that layer's polygons as lines,
+	// without the edges that clipping to the tile added (see outline_of).
+	int outlineOf = -1;
 	
 	const bool useColumn(std::string &col) {
 		return allSourceColumns || (std::find(sourceColumns.begin(), sourceColumns.end(), col) != sourceColumns.end());
