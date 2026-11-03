@@ -300,6 +300,7 @@ void rawRestartRelations() { return osmLuaProcessing->RestartRelations(); }
 std::string rawFindInRelation(const std::string& key) { return osmLuaProcessing->FindInRelation(key); }
 void rawAccept() { return osmLuaProcessing->Accept(); }
 double rawAreaIntersecting(const std::string& layerName) { return osmLuaProcessing->AreaIntersecting(layerName); }
+kaguya::optional<std::string> rawLargestIntersecting(const std::string& layerName, double minShare) { return osmLuaProcessing->LargestIntersecting(layerName, minShare); }
 
 void rawSetData(const std::string &key, const std::string &value) { 
 	std::lock_guard<std::mutex> lock(osmLuaProcessing->dataStoreMutex);
@@ -522,6 +523,7 @@ OsmLuaProcessing::OsmLuaProcessing(
 	luaState["GeoJSON"] = &rawGeoJSON;
 	luaState["Area"] = &rawArea;
 	luaState["AreaIntersecting"] = &rawAreaIntersecting;
+	luaState["LargestIntersecting"] = &rawLargestIntersecting;
 	luaState["Length"] = &rawLength;
 	luaState["Centroid"] = &rawCentroid;
 	luaState["Layer"] = &rawLayer;
@@ -723,6 +725,96 @@ std::vector<uint> OsmLuaProcessing::intersectsQuery(const string &layerName, boo
 		}
 	);
 	return ids;
+}
+
+// The smallest feature of an indexed layer that geom intersects; ties go to
+// the lower id, so the answer doesn't depend on the index's order.
+template <typename GeometryT>
+kaguya::optional<std::string> OsmLuaProcessing::smallestIntersecting(const string &layerName, const GeometryT &geom) const {
+	Box box; geom::envelope(geom, box);
+	if (!shpMemTiles.mayIntersect(layerName, box)) return kaguya::optional<std::string>();
+	// As in largestIntersecting, sizes[i] belongs to ids[i].
+	std::vector<double> sizes;
+	std::vector<uint> ids = shpMemTiles.QueryMatchingGeometries(layerName, false, box,
+		[&](const RTree &rtree) {
+			vector<IndexValue> results;
+			rtree.query(geom::index::intersects(box), back_inserter(results));
+			return results;
+		},
+		[&](OutputObject const &oo) {
+			const auto &mp = shpMemTiles.retrieveMultiPolygon(oo.objectID);
+			if (!geom::intersects(geom, mp)) return false;
+			sizes.push_back(geom::area(mp));
+			return true;
+		}
+	);
+	if (ids.empty()) return kaguya::optional<std::string>();
+	size_t best = 0;
+	for (size_t i = 1; i < ids.size(); i++)
+		if (sizes[i] < sizes[best] || (sizes[i] == sizes[best] && ids[i] < ids[best])) best = i;
+	std::vector<std::string> names = shpMemTiles.namesOfGeometries({ ids[best] });
+	if (names.empty()) return kaguya::optional<std::string>();
+	return names[0];
+}
+
+// The feature of an indexed layer that the current object is mostly in: the
+// one its largest share of area overlaps, if that share is at least minShare.
+// A point or line gets the smallest feature it touches (the most specific,
+// e.g. a park rather than the park system around it).
+kaguya::optional<std::string> OsmLuaProcessing::LargestIntersecting(const string &layerName, double minShare) {
+	if (!isWay) return smallestIntersecting(layerName, getPoint());
+	if (!isClosed && isRelation) return smallestIntersecting(layerName, multiLinestringCached());
+	if (!isClosed) return smallestIntersecting(layerName, linestringCached());
+	if (isRelation) return largestIntersecting(layerName, multiPolygonCached(), minShare);
+	MultiPolygon mp;
+	mp.push_back(polygonCached());
+	return largestIntersecting(layerName, mp, minShare);
+}
+
+template <typename GeometryT>
+kaguya::optional<std::string> OsmLuaProcessing::largestIntersecting(const string &layerName, GeometryT &geom, double minShare) const {
+	Box box; geom::envelope(geom, box);
+	if (!shpMemTiles.mayIntersect(layerName, box))
+		return kaguya::optional<std::string>();
+	const double total = multiPolygonArea(geom);
+	if (total <= 0) return kaguya::optional<std::string>();
+	// The check query runs once per candidate, in order, and its matches are
+	// returned in the same order, so areas[i] is the overlap of ids[i].
+	std::vector<double> areas, sizes;
+	std::vector<uint> ids = shpMemTiles.QueryMatchingGeometries(layerName, false, box,
+		[&](const RTree &rtree) { // indexQuery
+			vector<IndexValue> results;
+			rtree.query(geom::index::intersects(box), back_inserter(results));
+			return results;
+		},
+		[&](OutputObject const &oo) { // checkQuery
+			const auto &other = shpMemTiles.retrieveMultiPolygon(oo.objectID);
+			if (!geom::intersects(geom, other)) return false;
+			MultiPolygon tmp;
+			try {
+				geom::intersection(geom, other, tmp);
+			} catch (std::exception &e) {
+				return false;
+			}
+			areas.push_back(multiPolygonArea(tmp));
+			sizes.push_back(geom::area(other));
+			return true;
+		}
+	);
+	if (ids.empty()) return kaguya::optional<std::string>();
+	// Largest overlap; on a tie (within 0.1%, e.g. a lake wholly inside a park
+	// and the park system around it), the smaller, more specific feature.
+	size_t best = 0;
+	for (size_t i = 1; i < areas.size(); i++) {
+		const double tol = 0.001 * std::max(areas[i], areas[best]);
+		if (areas[i] > areas[best] + tol) best = i;
+		else if (areas[i] >= areas[best] - tol &&
+			(sizes[i] < sizes[best] || (sizes[i] == sizes[best] && ids[i] < ids[best]))) best = i;
+	}
+	if (areas[best] < minShare * total) return kaguya::optional<std::string>();
+	std::vector<std::string> names = shpMemTiles.namesOfGeometries({ ids[best] });
+	if (names.empty()) return kaguya::optional<std::string>();
+	return names[0];
 }
 
 template <typename GeometryT>

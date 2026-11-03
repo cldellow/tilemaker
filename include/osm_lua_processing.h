@@ -144,6 +144,9 @@ public:
 	bool Intersects(const std::string &layerName);
 	kaguya::optional<std::string> GeoJSON(bool area);
 	template <typename GeometryT> double intersectsArea(const std::string &layerName, GeometryT &geom) const;
+	kaguya::optional<std::string> LargestIntersecting(const std::string &layerName, double minShare);
+	template <typename GeometryT> kaguya::optional<std::string> largestIntersecting(const std::string &layerName, GeometryT &geom, double minShare) const;
+	template <typename GeometryT> kaguya::optional<std::string> smallestIntersecting(const std::string &layerName, const GeometryT &geom) const;
 	template <typename GeometryT> std::vector<uint> intersectsQuery(const std::string &layerName, bool once, GeometryT &geom) const;
 
 	std::vector<std::string> FindCovering(const std::string &layerName);
