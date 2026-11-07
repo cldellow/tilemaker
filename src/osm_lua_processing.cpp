@@ -352,7 +352,10 @@ kaguya::optional<std::string> OsmLuaProcessing::GeoJSON(bool area) {
 	} else if (geomType==MULTILINESTRING_) {
 		MultiLinestring mls;
 		try {
-			mls = multiLinestringCached();
+			// In member order, unlike the relation's layer geometry: a route
+			// relation's members run from its start to its end, and exports
+			// want that direction (hikeratlas/routes#73).
+			mls = osmStore.wayListOrderedMultiLinestring(outerWayVecPtr->cbegin(), outerWayVecPtr->cend());
 		} catch(std::out_of_range &err) {
 			return kaguya::optional<std::string>();
 		}
