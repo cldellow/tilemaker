@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <iostream>
@@ -6,6 +7,7 @@
 #include "tile_data.h"
 #include "coordinates_geom.h"
 #include "leased_store.h"
+#include "stable_hash.h"
 #include <ciso646>
 
 using namespace std;
@@ -166,6 +168,13 @@ void TileDataSource::collectTilesWithObjectsAtZoom(std::vector<std::shared_ptr<T
 	collectTilesWithObjectsAtZoomTemplate<OutputObjectXYID>(indexZoom, objectsWithIds.begin(), objectsWithIds.size(), zooms);
 }
 
+void TileDataSource::collectTilesWithObjectsInShard(size_t shard, std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms) {
+	if (shard < objects.size())
+		collectTilesWithObjectsInShardTemplate<OutputObjectXY>(indexZoom, objects[shard], shard, zooms);
+	if (shard < objectsWithIds.size())
+		collectTilesWithObjectsInShardTemplate<OutputObjectXYID>(indexZoom, objectsWithIds[shard], shard, zooms);
+}
+
 void addCoveredTilesToOutput(const uint indexZoom, std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms, const Box& box) {
 	size_t maxZoom = zooms.size() - 1;
 // 	std::cout << "addCoveredTilesToOutput maxZoom=" << maxZoom << ", indexZoom - maxZoom = " << (indexZoom - maxZoom) << std::endl;
@@ -174,16 +183,11 @@ void addCoveredTilesToOutput(const uint indexZoom, std::vector<std::shared_ptr<T
 	TileCoordinate maxx = box.max_corner().x() / scale;
 	TileCoordinate miny = box.min_corner().y() / scale;
 	TileCoordinate maxy = box.max_corner().y() / scale;
-	for (int x=minx; x<=maxx; x++) {
-		for (int y=miny; y<=maxy; y++) {
-			size_t zx = x, zy = y;
-
-			for (int zoom = maxZoom; zoom >= 0; zoom--) {
-				zooms[zoom]->set(zx, zy);
-				zx /= 2;
-				zy /= 2;
-			}
-		}
+	// The parents of the tiles in the box are the tiles in the box scaled down
+	for (int zoom = maxZoom; zoom >= 0; zoom--) {
+		zooms[zoom]->setBox(minx, maxx, miny, maxy);
+		minx /= 2; maxx /= 2;
+		miny /= 2; maxy /= 2;
 	}
 }
 
@@ -504,33 +508,170 @@ void TileDataSource::reportSize() const {
 
 void populateTilesAtZoom(
 	const std::vector<class TileDataSource *>& sources,
-	std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms
+	std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms,
+	size_t threadNum
 ) {
 	if (zooms.size() > 15)
 		throw std::out_of_range("populateTilesAtZoom: expected at most z14 zooms (15), but found " + std::to_string(zooms.size()) + " vectors");
 
-	for(size_t i=0; i<sources.size(); i++) {
-		sources[i]->collectTilesWithObjectsAtZoom(zooms);
-		sources[i]->collectTilesWithLargeObjectsAtZoom(zooms);
+	std::vector<PreciseTileCoordinatesSet*> precise;
+	for (const auto& zoom : zooms)
+		precise.push_back(dynamic_cast<PreciseTileCoordinatesSet*>(zoom.get()));
+	const bool allPrecise = std::find(precise.begin(), precise.end(), nullptr) == precise.end();
+
+	if (threadNum <= 1 || !allPrecise) {
+		for (size_t i = 0; i < sources.size(); i++)
+			sources[i]->collectTilesWithObjectsAtZoom(zooms);
+	} else {
+		// Objects are kept per z6 tile. Each worker takes whole columns of z6
+		// tiles (so that it touches only its part of the bitmaps), sets bits in
+		// bitmaps of its own, and these are merged at the end.
+		std::atomic<size_t> nextColumn(0);
+		std::vector<std::vector<std::shared_ptr<TileCoordinatesSet>>> local(threadNum);
+		boost::asio::thread_pool pool(threadNum);
+		for (size_t t = 0; t < threadNum; t++) {
+			boost::asio::post(pool, [&, t]() {
+				auto& mine = local[t];
+				for (size_t zoom = 0; zoom < zooms.size(); zoom++)
+					mine.push_back(std::make_shared<PreciseTileCoordinatesSet>(zoom));
+				for (size_t column; (column = nextColumn++) < CLUSTER_ZOOM_WIDTH; )
+					for (size_t row = 0; row < CLUSTER_ZOOM_WIDTH; row++)
+						for (const auto source : sources)
+							source->collectTilesWithObjectsInShard(column * CLUSTER_ZOOM_WIDTH + row, mine);
+			});
+		}
+		pool.join();
+		for (const auto& mine : local)
+			for (size_t zoom = 0; zoom < mine.size(); zoom++)
+				precise[zoom]->merge(static_cast<const PreciseTileCoordinatesSet&>(*mine[zoom]));
 	}
+
+	for (size_t i = 0; i < sources.size(); i++)
+		sources[i]->collectTilesWithLargeObjectsAtZoom(zooms);
 }
 
 void sortOutputObjectIDs(
 	const std::vector<bool>& sortOrders, 
+	const AttributeStore& attributeStore,
 	std::vector<OutputObjectID>& data
 );
 
 std::vector<OutputObjectID> TileDataSource::getObjectsForTile(
 	const std::vector<bool>& sortOrders, 
+	const AttributeStore& attributeStore,
 	unsigned int zoom,
 	TileCoordinates coordinates
 ) {
 	std::vector<OutputObjectID> data;
 	collectObjectsForTile(zoom, coordinates, data);
 	collectLargeObjectsForTile(zoom, coordinates, data);
-	sortOutputObjectIDs(sortOrders, data);
+	sortOutputObjectIDs(sortOrders, attributeStore, data);
 	data.erase(unique(data.begin(), data.end()), data.end());
+	orderStoredGeometryTies(data);
 	return data;
+}
+
+namespace {
+struct GeometryTieKey {
+	double x, y;      // first point
+	uint64_t points;  // number of points
+	uint64_t hash;    // of all points, only computed when the above are equal
+	OutputObjectID o;
+};
+
+// Adds a ring/linestring to the key: first point and point count, or (withHash) the hash of all points
+template<class R>
+void addToTieKey(GeometryTieKey& key, const R& ring, bool withHash) {
+	if (withHash) {
+		key.hash = stableCombine(key.hash, static_cast<uint64_t>(ring.size()));
+		for (const auto& p : ring) {
+			key.hash = stableCombine(key.hash, static_cast<double>(p.x()));
+			key.hash = stableCombine(key.hash, static_cast<double>(p.y()));
+		}
+		return;
+	}
+	if (key.points == 0 && !ring.empty()) {
+		key.x = ring.front().x();
+		key.y = ring.front().y();
+	}
+	key.points += ring.size();
+}
+
+void geometryTieKey(const TileDataSource& source, GeometryTieKey& key, bool withHash) {
+	const NodeID objectID = key.o.oo.objectID;
+	switch (key.o.oo.geomType) {
+		case POINT_: {
+			const Point& p = source.retrievePoint(objectID);
+			addToTieKey(key, std::array<Point, 1>{p}, withHash);
+			break;
+		}
+		case LINESTRING_:
+			addToTieKey(key, source.retrieveLinestring(objectID), withHash);
+			break;
+		case MULTILINESTRING_:
+			for (const auto& ls : source.retrieveMultiLinestring(objectID))
+				addToTieKey(key, ls, withHash);
+			break;
+		case POLYGON_:
+			for (const auto& poly : source.retrieveMultiPolygon(objectID)) {
+				addToTieKey(key, poly.outer(), withHash);
+				for (const auto& inner : poly.inners())
+					addToTieKey(key, inner, withHash);
+			}
+			break;
+	}
+}
+}
+
+// Geometries stored at runtime (relations, shapefiles, ...) have an objectID that
+// depends on which thread stored them, so the sort ties objects that share layer,
+// z_order, type, attributes and id in an arbitrary order. Order such runs by
+// geometry instead. OSM ways and nodes carry their OSM id in the objectID, and
+// sort after stored geometries, so they never need this.
+void TileDataSource::orderStoredGeometryTies(std::vector<OutputObjectID>& data) const {
+	const NodeID storedLimit = 1ull << TILE_DATA_ID_SIZE;
+	auto tied = [](const OutputObjectID& a, const OutputObjectID& b) {
+		return a.oo.layer == b.oo.layer && a.oo.z_order == b.oo.z_order && a.oo.geomType == b.oo.geomType &&
+		       a.oo.attributes == b.oo.attributes && a.id == b.id;
+	};
+
+	std::vector<GeometryTieKey> keys;
+	size_t i = 0;
+	while (i < data.size()) {
+		size_t j = i + 1;
+		if (data[i].oo.objectID < storedLimit)
+			while (j < data.size() && data[j].oo.objectID < storedLimit && tied(data[i], data[j])) j++;
+		if (j - i < 2) { i = j; continue; }
+
+		keys.clear();
+		for (size_t k = i; k < j; k++) {
+			keys.push_back(GeometryTieKey{0, 0, 0, 0, data[k]});
+			geometryTieKey(*this, keys.back(), false);
+		}
+		auto byPoint = [](const GeometryTieKey& a, const GeometryTieKey& b) {
+			if (a.x != b.x) return a.x < b.x;
+			if (a.y != b.y) return a.y < b.y;
+			return a.points < b.points;
+		};
+		std::sort(keys.begin(), keys.end(), byPoint);
+
+		// Still tied: hash all points (identical geometries may stay in any order)
+		for (size_t a = 0; a < keys.size(); ) {
+			size_t b = a + 1;
+			while (b < keys.size() && !byPoint(keys[a], keys[b])) b++;
+			if (b - a > 1) {
+				for (size_t k = a; k < b; k++) geometryTieKey(*this, keys[k], true);
+				std::sort(keys.begin() + a, keys.begin() + b, [](const GeometryTieKey& p, const GeometryTieKey& q) {
+					if (p.hash != q.hash) return p.hash < q.hash;
+					return p.o.oo.objectID < q.o.oo.objectID;
+				});
+			}
+			a = b;
+		}
+
+		for (size_t k = i; k < j; k++) data[k] = keys[k - i].o;
+		i = j;
+	}
 }
 
 // ------------------------------------
