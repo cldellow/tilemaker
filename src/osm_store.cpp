@@ -165,6 +165,48 @@ MultiLinestring OSMStore::wayListMultiLinestring(WayVec::const_iterator outerBeg
 	return mls;
 }
 
+// A relation's ways as lines in member order: each way turned to continue
+// from the end of the one before, and a new line started where consecutive
+// members don't meet. Route relations list their ways from start to end, so
+// this keeps a route's direction and where it starts, which
+// mergeMultiPolygonWays (joining ways by their shared ends) loses.
+MultiLinestring OSMStore::wayListOrderedMultiLinestring(WayVec::const_iterator begin, WayVec::const_iterator end) const {
+	std::vector<std::vector<LatpLon>> members;
+	for (auto it = begin; it != end; ++it) {
+		try {
+			std::vector<LatpLon> way = ways.at(*it);
+			if (way.size() >= 2) members.push_back(std::move(way));
+		} catch (std::out_of_range &err) {
+			if (verbose) { cerr << "Missing way in relation: " << err.what() << endl; }
+		}
+	}
+
+	// Whether a way's end meets either end of another.
+	auto meets = [](const LatpLon &p, const std::vector<LatpLon> &w) { return p == w.front() || p == w.back(); };
+
+	std::vector<LatpLonDeque> lines;
+	for (size_t i = 0; i < members.size(); i++) {
+		std::vector<LatpLon> &way = members[i];
+		if (!lines.empty()) {
+			LatpLonDeque &line = lines.back();
+			if (way.front() == line.back()) { line.insert(line.end(), way.begin() + 1, way.end()); continue; }
+			if (way.back() == line.back()) { line.insert(line.end(), way.rbegin() + 1, way.rend()); continue; }
+		}
+		// The first way of a line: turned to end where the next member meets it.
+		if (i + 1 < members.size() && meets(way.front(), members[i + 1]) && !meets(way.back(), members[i + 1]))
+			std::reverse(way.begin(), way.end());
+		lines.emplace_back(way.begin(), way.end());
+	}
+
+	MultiLinestring mls;
+	for (auto &line : lines) {
+		Linestring ls;
+		fillPoints(ls, line.begin(), line.end());
+		mls.emplace_back(move(ls));
+	}
+	return mls;
+}
+
 // Assemble multipolygon constituent ways
 // - Any closed polygons are added as-is
 // - Linestrings are joined to existing linestrings with which they share a start/end

@@ -360,6 +360,7 @@ public:
 	// Relation -> MultiPolygon or MultiLinestring
 	MultiPolygon wayListMultiPolygon(WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd, WayVec::const_iterator innerBegin, WayVec::const_iterator innerEnd) const;
 	MultiLinestring wayListMultiLinestring(WayVec::const_iterator outerBegin, WayVec::const_iterator outerEnd) const;
+	MultiLinestring wayListOrderedMultiLinestring(WayVec::const_iterator begin, WayVec::const_iterator end) const;
 	void mergeMultiPolygonWays(std::vector<LatpLonDeque> &results, std::map<WayID,bool> &done, WayVec::const_iterator itBegin, WayVec::const_iterator itEnd) const;
 
 	///It is not really meaningful to try using a relation as a linestring. Not normally used but included
