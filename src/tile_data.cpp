@@ -100,10 +100,11 @@ thread_local bool clipResultValid = false;	// whether the last POLYGON_ clip is 
 // written, and tiles below clip from that piece. A piece only depends on the polygon and the tile,
 // never on the thread or the order, so the output stays the same for any thread count.
 //
-// The pieces are computed up front, all threads at once and largest polygon first: computed on
-// demand, a slow piece (up to ~15 s on the planet) held up every thread whose tiles needed it,
-// a third of the tile phase on a 96-thread planet run. After that they are only read, so the
-// tile threads look them up without a lock.
+// The pieces are known up front and computed by all threads, largest polygon first, before they
+// start on tiles: computed on demand, a slow piece (up to ~15 s on the planet) held up every
+// thread whose tiles needed it, a third of the tile phase on a 96-thread planet run. A thread
+// that runs out of pieces to start goes on to tiles; only a tile that needs a piece still being
+// computed waits for it. The map itself doesn't change, so the tiles look pieces up without a lock.
 #define SHARED_PIECE_MIN_POINTS 10000
 
 void TileDataSource::precomputeSharedPieces(const std::function<bool(TileCoordinate, TileCoordinate)> &present, unsigned threadNum) {
@@ -125,7 +126,7 @@ void TileDataSource::precomputeSharedPieces(const std::function<bool(TileCoordin
 	const std::vector<std::pair<NodeID, Box>> candidates(boxes.begin(), boxes.end());
 
 	// The pieces each candidate needs: tiles below which a tile is written, that its envelope reaches
-	struct Job { std::tuple<NodeID, TileCoordinate, TileCoordinate> key; uint64_t points; };
+	using Job = PieceJob;
 	std::vector<Job> jobs;
 	std::mutex jobsMutex;
 	std::atomic<size_t> next(0);
@@ -148,7 +149,7 @@ void TileDataSource::precomputeSharedPieces(const std::function<bool(TileCoordin
 			for (TileCoordinate x = x0; x <= x1; x++)
 				for (TileCoordinate y = y0; y <= y1; y++)
 					if (present(x, y) && boost::geometry::intersects(envelope, TileBbox(TileCoordinates(x, y), zoom, false, false).clippingBox))
-						local.push_back(Job { std::make_tuple(objectID, x, y), points });
+						local.push_back(Job { std::make_tuple(objectID, x, y), points, nullptr });
 		}
 		std::lock_guard<std::mutex> lock(jobsMutex);
 		jobs.insert(jobs.end(), local.begin(), local.end());
@@ -159,40 +160,37 @@ void TileDataSource::precomputeSharedPieces(const std::function<bool(TileCoordin
 		pool.join();
 	}
 	std::sort(jobs.begin(), jobs.end(), [](const Job &a, const Job &b) { return a.points != b.points ? a.points > b.points : a.key < b.key; });
-	for (const Job &job : jobs) {
+	for (Job &job : jobs) {
 		pieceObjects.insert(std::get<0>(job.key));
-		sharedPieces.emplace(job.key, nullptr);
+		job.promise = std::make_shared<std::promise<std::shared_ptr<const SharedPiece>>>();
+		sharedPieces.emplace(job.key, job.promise->get_future().share());
 	}
+	pieceJobs = std::move(jobs);
+	nextPieceJob = 0;
+}
 
-	// Compute them, largest polygon first. Each job writes its own map entry; the map itself
-	// doesn't change any more.
-	next = 0;
-	auto compute = [&]() {
-		for (size_t i = next++; i < jobs.size(); i = next++) {
-			const auto &key = jobs[i].key;
-			auto piece = std::make_shared<SharedPiece>();
-			try {
-				clipCacheBypass = true;
-				clipNeededRepair = false;
-				Geometry g = buildWayGeometry(POLYGON_, std::get<0>(key), TileBbox(TileCoordinates(std::get<1>(key), std::get<2>(key)), zoom, false, false));
-				// A piece that needed the repair path can be wrong (once a lake came out empty), and
-				// every tile below it would inherit that: leave those tiles to clip the whole polygon.
-				if (!clipNeededRepair) {
-					piece->geom = std::make_shared<MultiPolygon>(std::move(boost::get<MultiPolygon>(g)));
-					// buildWayGeometry has just checked it (for a huge piece, is_valid takes seconds)
-					piece->valid = clipResultValid;
-				}
-			} catch (std::exception &) {
-				// The tiles clip the whole polygon, and report the problem there
+void TileDataSource::computeSharedPieces() {
+	const unsigned zoom = SHARED_PIECE_ZOOM;
+	for (size_t i = nextPieceJob++; i < pieceJobs.size(); i = nextPieceJob++) {
+		const auto &key = pieceJobs[i].key;
+		auto piece = std::make_shared<SharedPiece>();
+		try {
+			clipCacheBypass = true;
+			clipNeededRepair = false;
+			Geometry g = buildWayGeometry(POLYGON_, std::get<0>(key), TileBbox(TileCoordinates(std::get<1>(key), std::get<2>(key)), zoom, false, false));
+			// A piece that needed the repair path can be wrong (once a lake came out empty), and
+			// every tile below it would inherit that: leave those tiles to clip the whole polygon.
+			if (!clipNeededRepair) {
+				piece->geom = std::make_shared<MultiPolygon>(std::move(boost::get<MultiPolygon>(g)));
+				// buildWayGeometry has just checked it (for a huge piece, is_valid takes seconds)
+				piece->valid = clipResultValid;
 			}
-			clipCacheBypass = false;
-			sharedPieces.find(key)->second = piece;
+		} catch (std::exception &) {
+			// The tiles clip the whole polygon, and report the problem there
 		}
-	};
-	{
-		boost::asio::thread_pool pool(threadNum);
-		for (unsigned t = 0; t < threadNum; t++) boost::asio::post(pool, compute);
-		pool.join();
+		clipCacheBypass = false;
+		pieceJobs[i].promise->set_value(piece);
+		pieceJobs[i].promise.reset();	// the map's future keeps the piece, until its z6 tile is released
 	}
 }
 
@@ -200,7 +198,7 @@ void TileDataSource::releaseSharedPieces(TileCoordinate z6x, TileCoordinate z6y)
 	const unsigned shift = SHARED_PIECE_ZOOM - CLUSTER_ZOOM;
 	for (auto &e : sharedPieces)
 		if ((std::get<1>(e.first) >> shift) == z6x && (std::get<2>(e.first) >> shift) == z6y)
-			e.second.reset();
+			e.second = std::shared_future<std::shared_ptr<const SharedPiece>>();
 }
 
 void TileDataSource::finalize(size_t threadNum) {
@@ -449,9 +447,12 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 				// A large polygon: clip from its shared piece
 				const unsigned shift = bbox.zoom - SHARED_PIECE_ZOOM;
 				auto it = sharedPieces.find(std::make_tuple(objectID, bbox.index.x >> shift, bbox.index.y >> shift));
-				if (it != sharedPieces.end() && it->second && it->second->geom) {
-					cachedClip = it->second->geom;
-					inputKnownValid = it->second->valid;
+				if (it != sharedPieces.end() && it->second.valid()) {
+					const std::shared_ptr<const SharedPiece> &piece = it->second.get();	// waits if still being computed
+					if (piece && piece->geom) {
+						cachedClip = piece->geom;
+						inputKnownValid = piece->valid;
+					}
 				}
 			}
 

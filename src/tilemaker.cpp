@@ -624,6 +624,8 @@ int main(const int argc, const char* argv[]) {
 		boost::asio::post(pool, [&]() {
 			std::size_t startIndex, batchSize;
 			uint64_t seq;
+			// Shared pieces first (see TileDataSource::precomputeSharedPieces)
+			for (auto source : sources) source->computeSharedPieces();
 			while (true) {
 				if (toPMTiles) sharedData.pmtiles.batches.waitForRoom();
 				if (toMBTiles) sharedData.mbtiles.batches.waitForRoom();
