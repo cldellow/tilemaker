@@ -511,7 +511,7 @@ void ProcessOutlines(
 			oo = *jt;
 		}
 		if (filterArea > 0.0) {
-			RemovePartsBelowSize(boost::get<MultiPolygon>(g), filterArea);
+			RemovePartsBelowSize(boost::get<MultiPolygon>(g), filterArea, bbox);
 			if (geom::is_empty(g)) continue;
 		}
 		writeOutline<Backend>(attributeStore, sharedData, vtLayer, bbox, oo, zoom, simplifyLevel, simplifyAlgo, boost::get<MultiPolygon>(g), attrMemo);
