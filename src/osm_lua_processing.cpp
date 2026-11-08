@@ -1584,8 +1584,7 @@ bool OsmLuaProcessing::scanRelation(WayID id, const TagMap& tags) {
 	try {
 		luaState["relation_scan_function"]();
 	} catch(luaProcessingException &e) {
-		std::cerr << "Lua error on scanning relation " << originalOsmID << std::endl;
-		exit(1);
+		throw std::runtime_error("Lua error on scanning relation " + std::to_string(originalOsmID));
 	}
 	if (!relationAccepted) return false;
 	
@@ -1627,8 +1626,7 @@ bool OsmLuaProcessing::setNode(NodeID id, LatpLon node, const TagMap& tags) {
 	try {
 		if (!callLuaGlobal("node_function", true)) luaState["node_function"]();
 	} catch(luaProcessingException &e) {
-		std::cerr << "Lua error on node " << originalOsmID << std::endl;
-		exit(1);
+		throw std::runtime_error("Lua error on node " + std::to_string(originalOsmID));
 	}
 
 	if (!this->empty()) {
@@ -1681,8 +1679,7 @@ bool OsmLuaProcessing::setWay(WayID wayId, LatpLonVec const &llVec, const TagMap
 				assert(!ret);
 			}
 		} catch(luaProcessingException &e) {
-			std::cerr << "Lua error on way " << originalOsmID << std::endl;
-			exit(1);
+			throw std::runtime_error("Lua error on way " + std::to_string(originalOsmID));
 		}
 	}
 
@@ -1731,8 +1728,7 @@ void OsmLuaProcessing::setRelation(
 			if (!callLuaGlobal("relation_function", true)) luaState["relation_function"]();
 		}
 	} catch(luaProcessingException &e) {
-		std::cerr << "Lua error on relation " << originalOsmID << std::endl;
-		exit(1);
+		throw std::runtime_error("Lua error on relation " + std::to_string(originalOsmID));
 	}
 	if (this->empty()) return;
 
