@@ -144,6 +144,16 @@ MU_TEST(test_indexed_multipolygon) {
 	mu_check(index.intersects(Box(Point(1, 1), Point(2, 2))));   // box inside
 	mu_check(!index.intersects(Box(Point(11, 1), Point(19, 2)))); // box between
 
+	// Nested shells (invalid, but common in OSM, e.g. Cleveland National
+	// Forest): a point in two polygons at once is inside, as geom::intersects says
+	MultiPolygon nested;
+	geom::read_wkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0)),((2 2,2 8,8 8,8 2,2 2)))", nested);
+	IndexedMultiPolygon nestedIndex(nested);
+	mu_check(geom::intersects(Point(5, 5), nested));
+	mu_check(nestedIndex.intersects(Point(5, 5)));
+	Linestring inBoth; geom::read_wkt("LINESTRING(4 4,6 6)", inBoth);
+	mu_check(nestedIndex.intersects(inBoth) == geom::intersects(inBoth, nested));
+
 	// Many queries, against geom::intersects
 	unsigned seed = 1;
 	auto rnd = [&](double lo, double hi) {

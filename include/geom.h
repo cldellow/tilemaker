@@ -112,9 +112,11 @@ bool rect_clip(const MultiPolygon &mp, Box const &bbox, MultiPolygon &out);
 // forest with 100k+ points) is tested against millions of small ones; with the
 // index a query only looks at the edges near it.
 //
-// Same results as geom::intersects() for a valid multipolygon: a query
-// intersects it if an edge of one crosses or touches an edge of the other, or
-// if one lies wholly inside the other, which a point of each settles.
+// Same results as geom::intersects(): a query intersects the multipolygon if
+// an edge of one crosses or touches an edge of the other, or if one lies wholly
+// inside the other, which a point of each settles. A point is inside if it's
+// inside any one polygon, so polygons that overlap or nest (invalid, but
+// common in OSM) give the same answer as geom::intersects() too.
 class IndexedMultiPolygon {
 public:
 	explicit IndexedMultiPolygon(const MultiPolygon &mp);
@@ -127,7 +129,8 @@ public:
 	bool intersects(const MultiPolygon &mp) const;
 
 private:
-	// Whether p is inside or on the multipolygon (even-odd over all rings).
+	// Whether p is inside or on the multipolygon: inside any one polygon,
+	// by the even-odd rule over its rings.
 	bool covers(const Point &p) const;
 	// Whether a segment crosses or touches any edge.
 	bool crossesEdge(const Segment &s) const;
@@ -137,7 +140,9 @@ private:
 
 	std::vector<Point> polygonVertices; // the first vertex of each polygon
 	double maxX;
-	boost::geometry::index::rtree<Segment, boost::geometry::index::rstar<16>> edges;
+	// Each edge, and the index of the polygon it belongs to.
+	using Edge = std::pair<Segment, unsigned>;
+	boost::geometry::index::rtree<Edge, boost::geometry::index::rstar<16>> edges;
 };
 
 // Cheap conservative validity tests, run before geom::is_valid. They return
