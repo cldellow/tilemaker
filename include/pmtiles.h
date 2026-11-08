@@ -77,8 +77,6 @@ private:
 	void writeTile(PendingTile &tile);	// with batches.writeMutex() held: places the tile
 	void flushTile(PendingTile &tile);	// in the same order, by one thread at a time: writes its bytes
 	void appendWithRLE(std::vector<pmtiles::entryv3> &entries, pmtiles::entryv3 &entry);
-	void appendTileEntry(uint64_t tileId, TileOffset offset, std::vector<pmtiles::entryv3> &rootEntries, std::vector<pmtiles::entryv3> &entries);
-	void flushEntries(std::vector<pmtiles::entryv3> &rootEntries, std::vector<pmtiles::entryv3> &entries);
 };
 
 #endif //_PMTILES_H
