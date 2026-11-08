@@ -21,7 +21,14 @@ static size_t pendingCost(const std::string& data) {
 }
 
 MBTiles::~MBTiles() {
-	if (db && inTransaction) db << "COMMIT;"; // commit all the changes if open
+	// commit all the changes if open (closeForWriting normally does this, and reports errors)
+	if (db && inTransaction) {
+		try {
+			db << "COMMIT;";
+		} catch (const std::exception &e) {
+			cerr << "Couldn't commit .mbtiles: " << e.what() << endl;
+		}
+	}
 }
 
 // ---- Write .mbtiles
@@ -91,11 +98,13 @@ void MBTiles::flushPendingStatements() {
 	
 void MBTiles::saveTile(int zoom, int x, int y, string *data, bool isMerge) {
 	// If the lock is available, write directly to SQLite.
-	if (m.try_lock()) {
-		insertOrReplace(zoom, x, y, *data, isMerge);
-		flushPendingStatements();
-		m.unlock();
-		return;
+	{
+		std::unique_lock<std::mutex> dbLock(m, std::try_to_lock);
+		if (dbLock.owns_lock()) {
+			insertOrReplace(zoom, x, y, *data, isMerge);
+			flushPendingStatements();
+			return;
+		}
 	}
 
 	{
@@ -118,6 +127,10 @@ void MBTiles::closeForWriting() {
 	flushPendingStatements();
 	preparedStatements[0].used(true);
 	preparedStatements[1].used(true);
+	if (inTransaction) {
+		inTransaction = false;
+		db << "COMMIT;";
+	}
 }
 
 // ---- Read mbtiles
