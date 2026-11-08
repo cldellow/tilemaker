@@ -175,6 +175,36 @@ MU_TEST(test_simplify_hole_near_outer) {
 	mu_check(geom::is_valid(p));
 }
 
+static bool sameBox(const Box &a, const Box &b) {
+	return geom::equals(a.min_corner(), b.min_corner()) && geom::equals(a.max_corner(), b.max_corner());
+}
+
+MU_TEST(test_merge_nearby_boxes) {
+	// Far apart (e.g. islands either side of the antimeridian): kept separate
+	std::vector<Box> far = merge_nearby_boxes({
+		Box(Point(0, 0), Point(10, 10)),
+		Box(Point(1000, 0), Point(1010, 10))
+	}, 4);
+	mu_check(far.size() == 2);
+
+	// Within the gap: merged into their envelope
+	std::vector<Box> near = merge_nearby_boxes({
+		Box(Point(0, 0), Point(10, 10)),
+		Box(Point(13, 0), Point(20, 5))
+	}, 4);
+	mu_check(near.size() == 1);
+	mu_check(sameBox(near[0], Box(Point(0, 0), Point(20, 10))));
+
+	// A and C are only close once B has joined A, after C was passed over
+	std::vector<Box> chain = merge_nearby_boxes({
+		Box(Point(0, 0), Point(10, 10)),
+		Box(Point(30, 0), Point(40, 10)),
+		Box(Point(12, 0), Point(27, 10))
+	}, 4);
+	mu_check(chain.size() == 1);
+	mu_check(sameBox(chain[0], Box(Point(0, 0), Point(40, 10))));
+}
+
 MU_TEST_SUITE(test_suite_geom) {
 	MU_RUN_TEST(test_rect_clip_concave);
 	MU_RUN_TEST(test_rect_clip_holes);
@@ -186,6 +216,7 @@ MU_TEST_SUITE(test_suite_geom) {
 	MU_RUN_TEST(test_precheck_large_polygon);
 	MU_RUN_TEST(test_simplify_no_holes);
 	MU_RUN_TEST(test_simplify_hole_near_outer);
+	MU_RUN_TEST(test_merge_nearby_boxes);
 }
 
 int main() {
