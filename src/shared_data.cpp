@@ -23,8 +23,14 @@ void SharedData::writeMBTilesProjectData() {
 	mbtiles.writeMetadata("version", config.projectVersion);
 	mbtiles.writeMetadata("description", config.projectDesc);
 	mbtiles.writeMetadata("format", config.tileFormat == TileFormat::MLT ? "mlt" : "pbf");
-	mbtiles.writeMetadata("minzoom", to_string(config.startZoom));
-	mbtiles.writeMetadata("maxzoom", to_string(config.endZoom));
+	uint minzoom = config.startZoom, maxzoom = config.endZoom;
+	if (mergeSqlite) {
+		string existing;
+		if (mbtiles.readMetadata("minzoom", existing)) minzoom = std::min(minzoom, static_cast<uint>(stoul(existing)));
+		if (mbtiles.readMetadata("maxzoom", existing)) maxzoom = std::max(maxzoom, static_cast<uint>(stoul(existing)));
+	}
+	mbtiles.writeMetadata("minzoom", to_string(minzoom));
+	mbtiles.writeMetadata("maxzoom", to_string(maxzoom));
 
 	ostringstream bounds;
 	if (mergeSqlite) {
@@ -47,9 +53,50 @@ void SharedData::writeMBTilesProjectData() {
 	}
 }
 
+// Add the vector_layers of an existing .mbtiles json object to the new one, for --merge:
+// zoom ranges are widened, missing fields and layers are added
+static string mergeVectorLayers(const string &existingJson, const string &newJson) {
+	Document existing, merged;
+	existing.Parse(existingJson.c_str());
+	merged.Parse(newJson.c_str());
+	if (existing.HasParseError() || !existing.IsObject() || !existing.HasMember("vector_layers") || !existing["vector_layers"].IsArray()) return newJson;
+	Document::AllocatorType &allocator = merged.GetAllocator();
+	Value &newLayers = merged["vector_layers"];
+
+	for (auto &oldLayer : existing["vector_layers"].GetArray()) {
+		if (!oldLayer.IsObject() || !oldLayer.HasMember("id") || !oldLayer["id"].IsString()) continue;
+		Value *match = nullptr;
+		for (auto &newLayer : newLayers.GetArray()) {
+			if (newLayer["id"] == oldLayer["id"]) { match = &newLayer; break; }
+		}
+		if (!match) {
+			newLayers.PushBack(Value(oldLayer, allocator), allocator);
+			continue;
+		}
+		if (oldLayer.HasMember("minzoom") && oldLayer["minzoom"].IsUint())
+			(*match)["minzoom"] = std::min((*match)["minzoom"].GetUint(), oldLayer["minzoom"].GetUint());
+		if (oldLayer.HasMember("maxzoom") && oldLayer["maxzoom"].IsUint())
+			(*match)["maxzoom"] = std::max((*match)["maxzoom"].GetUint(), oldLayer["maxzoom"].GetUint());
+		if (oldLayer.HasMember("fields") && oldLayer["fields"].IsObject()) {
+			Value &fields = (*match)["fields"];
+			for (auto &field : oldLayer["fields"].GetObject()) {
+				if (!fields.HasMember(field.name)) fields.AddMember(Value(field.name, allocator), Value(field.value, allocator), allocator);
+			}
+		}
+	}
+
+	StringBuffer buffer;
+	Writer<StringBuffer> writer(buffer);
+	merged.Accept(writer);
+	return string(buffer.GetString(), buffer.GetSize());
+}
+
 void SharedData::writeMBTilesMetadata(rapidjson::Document const &jsonConfig) {
 	// Write mbtiles 1.3+ json object
-	mbtiles.writeMetadata("json", layers.serialiseToJSON());
+	string json = layers.serialiseToJSON();
+	string existingJson;
+	if (mergeSqlite && mbtiles.readMetadata("json", existingJson)) json = mergeVectorLayers(existingJson, json);
+	mbtiles.writeMetadata("json", json);
 
 	// Write user-defined metadata
 	if (jsonConfig["settings"].HasMember("metadata")) {
@@ -81,6 +128,10 @@ void SharedData::writeFileMetadata(rapidjson::Document const &jsonConfig) {
 	if (jsonConfig["settings"].HasMember("filemetadata")) {
 		const rapidjson::Value &md = jsonConfig["settings"]["filemetadata"];
 		document.CopyFrom(md, document.GetAllocator());
+	}
+	// Same attribution as .mbtiles/.pmtiles output, unless filemetadata sets its own
+	if (!document.HasMember("attribution") && jsonConfig["settings"].HasMember("metadata") && jsonConfig["settings"]["metadata"].HasMember("attribution")) {
+		document.AddMember("attribution", rapidjson::Value().SetString(jsonConfig["settings"]["metadata"]["attribution"].GetString(), document.GetAllocator()), document.GetAllocator());
 	}
 
 	rapidjson::Value boundsArray(rapidjson::kArrayType);
@@ -194,25 +245,33 @@ std::vector<bool> LayerDefinition::getSortOrders() {
 
 Value LayerDefinition::serialiseToJSONValue(rapidjson::Document::AllocatorType &allocator) const {
 	Value layerArray(kArrayType);
-	for (auto it = layers.begin(); it != layers.end(); ++it) {
-		if (it->writeTo) {
-			continue;
+	for (auto lt = layerOrder.begin(); lt != layerOrder.end(); ++lt) {
+		// Merge fields and zoom range of all layers written to this one (write_to)
+		const LayerDef &target = layers[lt->at(0)];
+		std::map<std::string, uint> attributeMap;
+		uint minzoom = target.minzoom, maxzoom = target.maxzoom;
+		for (uint layerNum : *lt) {
+			const LayerDef &layer = layers[layerNum];
+			attributeMap.insert(layer.attributeMap.begin(), layer.attributeMap.end());
+			minzoom = std::min(minzoom, layer.minzoom);
+			maxzoom = std::max(maxzoom, layer.maxzoom);
 		}
 		Value fieldObj(kObjectType);
-		for (auto jt = it->attributeMap.begin(); jt != it->attributeMap.end(); ++jt) {
+		for (auto jt = attributeMap.begin(); jt != attributeMap.end(); ++jt) {
 			Value k(jt->first.c_str(), allocator);
 			switch (jt->second) {
 				case 0: fieldObj.AddMember(k, "String" , allocator); break;
 				case 1:	fieldObj.AddMember(k, "Number" , allocator); break;
 				case 2:	fieldObj.AddMember(k, "Boolean", allocator); break;
+				case 3:	fieldObj.AddMember(k, "Number" , allocator); break;
 			}
 		}
 		Value layerObj(kObjectType);
-		Value name(it->name.c_str(), allocator);
-		layerObj.AddMember("id",      name,        allocator);
-		layerObj.AddMember("fields",  fieldObj,    allocator);
-		layerObj.AddMember("minzoom", it->minzoom, allocator);
-		layerObj.AddMember("maxzoom", it->maxzoom, allocator);
+		Value name(target.name.c_str(), allocator);
+		layerObj.AddMember("id",      name,     allocator);
+		layerObj.AddMember("fields",  fieldObj, allocator);
+		layerObj.AddMember("minzoom", minzoom,  allocator);
+		layerObj.AddMember("maxzoom", maxzoom,  allocator);
 		layerArray.PushBack(layerObj, allocator);
 	}
 
@@ -375,6 +434,11 @@ void Config::readConfig(rapidjson::Document &jsonConfig, bool &hasClippingBox, B
 				filterBelow, filterArea, sortZOrderAscending, featureLimit, featureLimitBelow, combinePoints, combineLinesBelow, combinePolyBelow,
 				source, sourceColumns, allSourceColumns, indexed, indexName,
 				writeTo);
+
+		// Also repair clipped-and-quantised geometry such as ocean shapefiles,
+		// which is otherwise written out invalid
+		if (it->value.HasMember("repair_polygons"))
+			layers.layers[layerNum].repairPolygons = it->value["repair_polygons"].GetBool();
 
 		// Decluttering (thinning out point features by the score their profile gives them)
 		if (it->value.HasMember("declutter_below")) {

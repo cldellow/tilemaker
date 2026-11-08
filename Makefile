@@ -6,7 +6,7 @@ PLATFORM_PATH := /usr/local
 # First, find what the Lua executable is called
 # - when a new Lua is released, then add it before 5.4 here
 LUA_CMD := $(shell luajit -e 'print("luajit")' 2> /dev/null || lua -e 'print("lua")' 2> /dev/null || lua5.4 -e 'print("lua5.4")' 2> /dev/null || lua5.3 -e 'print("lua5.3")' 2> /dev/null || lua5.2 -e 'print("lua5.2")' 2> /dev/null || lua5.1 -e 'print("lua5.1")' 2> /dev/null)
-ifeq ($(LUA_CMD),"")
+ifeq ($(LUA_CMD),)
   $(error Couldn't find Lua interpreter)
 endif
 $(info Using ${LUA_CMD})
@@ -161,6 +161,7 @@ test: \
 	test_geom \
 	test_helpers \
 	test_options_parser \
+	test_ordered_batches \
 	test_pbf_reader \
 	test_pooled_string \
 	test_relation_roles \
@@ -228,6 +229,10 @@ test_options_parser: \
 	src/options_parser.o \
 	test/options_parser.test.o
 	$(CXX) $(CXXFLAGS) -o test.options_parser $^ $(INC) $(LIB) $(LDFLAGS) && ./test.options_parser
+
+test_ordered_batches: \
+	test/ordered_batches.test.o
+	$(CXX) $(CXXFLAGS) -o test.ordered_batches $^ $(INC) $(LIB) $(LDFLAGS) && ./test.ordered_batches
 
 test_osm_store: \
 	test/osm_store.test.o

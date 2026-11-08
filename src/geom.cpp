@@ -7,6 +7,7 @@
 #include <boost/geometry/strategies/buffer.hpp>
 
 #include "geometry/correct.hpp"
+#include <limits>
 
 #include <algorithm>
 #include <cmath>
@@ -566,9 +567,22 @@ bool multiPolygonDefinitelyValid(const MultiPolygon &mp) {
 
 // Repair a single (possibly invalid) polygon in an area-preserving way and
 // append the resulting valid polygon(s) to `out`. Returns true on success.
-// `minArea` is the lower bound on the repaired area we are willing to accept.
-static bool repair_one_polygon(const Polygon &p, double minArea, MultiPolygon &out)
+// A repair is only accepted if the resulting area stays within
+// [minArea, maxArea]:
+//  - the LOWER bound catches a collapse (dissolve/buffer dropping most of the
+//    covered area on huge inputs);
+//  - the UPPER bound catches a FILLED HOLE, which is what used to make an ocean
+//    polygon swallow a whole island. Measured on real data, the separation is
+//    large: genuine repairs of quantised ocean polygons change the area by
+//    <=0.01 %, whereas filling one island hole grew it by 32 %.
+static bool repair_one_polygon(const Polygon &p, double minArea, double maxArea, MultiPolygon &out)
 {
+	auto acceptable = [&](const MultiPolygon &candidate) {
+		if (!geom::is_valid(candidate)) return false;
+		const double a = std::abs(geom::area(candidate));
+		return a >= minArea && a <= maxArea;
+	};
+
 	// 0) Fast path: a ring without holes whose only fault is its orientation
 	// (e.g. after the y-flip into tile coordinates). On such a simple ring the
 	// dissolve finds no intersections and just reverses it, so do that directly.
@@ -577,7 +591,7 @@ static bool repair_one_polygon(const Polygon &p, double minArea, MultiPolygon &o
 		std::reverse(rev.outer().begin(), rev.outer().end());
 		const double revArea = std::abs(geom::area(rev));
 		bool revValid = false;
-		if (revArea > 1E-12 && revArea >= minArea) {
+		if (revArea > 1E-12 && revArea >= minArea && revArea <= maxArea) {
 			const bool pre = polygonDefinitelyValid(rev);
 			revValid = pre || geom::is_valid(rev);
 		}
@@ -591,7 +605,7 @@ static bool repair_one_polygon(const Polygon &p, double minArea, MultiPolygon &o
 	try {
 		MultiPolygon fixed;
 		geometry::correct(p, fixed, 1E-12);
-		if (geom::is_valid(fixed) && std::abs(geom::area(fixed)) >= minArea) {
+		if (acceptable(fixed)) {
 			for (auto &fp : fixed) out.push_back(std::move(fp));
 			return true;
 		}
@@ -610,7 +624,7 @@ static bool repair_one_polygon(const Polygon &p, double minArea, MultiPolygon &o
 
 		geom::buffer(p, buffered, distanceStrategy, sideStrategy, joinStrategy, endStrategy, pointStrategy);
 		geom::correct(buffered);
-		if (geom::is_valid(buffered) && std::abs(geom::area(buffered)) >= minArea) {
+		if (acceptable(buffered)) {
 			for (auto &bp : buffered) out.push_back(std::move(bp));
 			return true;
 		}
@@ -621,7 +635,7 @@ static bool repair_one_polygon(const Polygon &p, double minArea, MultiPolygon &o
 	return false;
 }
 
-bool repair_multi_polygon(MultiPolygon &mp, bool knownInvalid, bool *wholeValid)
+bool repair_multi_polygon(MultiPolygon &mp, bool knownInvalid, bool *wholeValid, AreaBound areaBound)
 {
 	if (wholeValid) *wholeValid = false;
 	if (!knownInvalid) {
@@ -655,13 +669,20 @@ bool repair_multi_polygon(MultiPolygon &mp, bool knownInvalid, bool *wholeValid)
 				continue;
 			}
 		}
-		// Lenient threshold: resolving a self-intersection legitimately changes a
-		// single polygon's (shoelace) area, so anything down to half the original
-		// is accepted. Per-polygon repair cannot trigger the cross-polygon union
-		// that previously caused the catastrophic ~99% collapse, so this only
-		// rejects a genuine local collapse.
-		const double minArea = 0.5 * std::abs(geom::area(p));
-		if (!repair_one_polygon(p, minArea, out)) {
+		// Lenient lower bound: resolving a self-intersection legitimately changes
+		// a single polygon's (shoelace) area, so anything down to half the
+		// original is accepted. Per-polygon repair cannot trigger the
+		// cross-polygon union that previously caused the catastrophic ~99%
+		// collapse, so this only rejects a genuine local collapse.
+		// The upper bound is only applied with AreaBound::Strict, i.e. for geometry
+		// that was not simplified. Applying it to simplified geometry would be
+		// wrong: it rejects legitimate repairs there and measurably made things
+		// worse (5 -> 20 invalid features in one tile).
+		const double origArea = std::abs(geom::area(p));
+		const double maxArea = areaBound == AreaBound::Strict
+		                     ? 1.01 * origArea
+		                     : std::numeric_limits<double>::infinity();
+		if (!repair_one_polygon(p, 0.5 * origArea, maxArea, out)) {
 			out.push_back(p);
 			allValid = false;
 		}
@@ -709,8 +730,38 @@ static void union_near(MultiPolygon &a, MultiPolygon &b, MultiPolygon &out) {
 		(bIsNear[j] ? bNear : out).push_back(std::move(b[j]));
 
 	if (aNear.empty()) return;
+
+	// Boost.Geometry's union_ can lose area: for two valid polygons that share an
+	// edge along nearly collinear vertices it drops one of them, or returns nothing,
+	// depending on the argument order (boostorg/geometry#1506, still in 1.92). A
+	// union covers both inputs, so check its area and retry with the arguments
+	// swapped. If that loses area too, keep the polygons uncombined: exact when they
+	// don't overlap, which is the common case for adjacent polygons.
+	// The overlap is only computed when the union is smaller than both inputs together.
+	const double sum = boost::geometry::area(aNear) + boost::geometry::area(bNear);
+	double expected = -1.0;
+	auto keepsArea = [&](const MultiPolygon &mp) {
+		const double area = boost::geometry::area(mp);
+		if (area >= sum * (1.0 - 1e-6)) return true;
+		if (expected < 0.0) {
+			MultiPolygon overlap;
+			boost::geometry::intersection(aNear, bNear, overlap);
+			expected = sum - boost::geometry::area(overlap);
+		}
+		return area >= expected * (1.0 - 1e-6);
+	};
+
 	MultiPolygon unified;
 	boost::geometry::union_(aNear, bNear, unified);
+	if (!keepsArea(unified)) {
+		unified.clear();
+		boost::geometry::union_(bNear, aNear, unified);
+		if (!keepsArea(unified)) {
+			for (auto &p : aNear) out.push_back(std::move(p));
+			for (auto &p : bNear) out.push_back(std::move(p));
+			return;
+		}
+	}
 	for (auto &p : unified) out.push_back(std::move(p));
 }
 
@@ -1225,3 +1276,113 @@ std::vector<Box> merge_nearby_boxes(std::vector<Box> boxes, double gap) {
 	}
 	return boxes;
 }
+
+namespace {
+std::vector<std::pair<Segment, unsigned>> ringEdges(const MultiPolygon &mp) {
+	std::vector<std::pair<Segment, unsigned>> edges;
+	for (unsigned polygon = 0; polygon < mp.size(); polygon++) {
+		auto addRing = [&](const Ring &ring) {
+			for (std::size_t i = 0; i + 1 < ring.size(); i++)
+				edges.emplace_back(Segment(ring[i], ring[i + 1]), polygon);
+		};
+		addRing(mp[polygon].outer());
+		for (const Ring &inner : mp[polygon].inners()) addRing(inner);
+	}
+	return edges;
+}
+}
+
+IndexedMultiPolygon::IndexedMultiPolygon(const MultiPolygon &mp):
+	maxX(mp.empty() ? 0 : geom::return_envelope<Box>(mp).max_corner().x()),
+	edges(ringEdges(mp)) { // the range constructor bulk-loads (packs) the tree
+	for (const Polygon &poly : mp)
+		if (!poly.outer().empty()) polygonVertices.push_back(poly.outer().front());
+}
+
+bool IndexedMultiPolygon::covers(const Point &p) const {
+	// Count, per polygon, the edges a ray from p towards +x crosses: an odd
+	// count is inside that polygon. An edge counts if it straddles the ray's y
+	// (half-open, so a vertex on the ray counts once) and crosses it at or
+	// right of p. A point on an edge is on the boundary, which covers()
+	// includes.
+	const Box ray(p, Point(std::max(maxX, p.x()), p.y()));
+	std::vector<unsigned> crossed; // polygon indices, one per crossing
+	for (auto it = edges.qbegin(boost::geometry::index::intersects(ray)); it != edges.qend(); ++it) {
+		const Point &a = it->first.first, &b = it->first.second;
+		if (geom::intersects(it->first, p)) return true;
+		if ((a.y() > p.y()) == (b.y() > p.y())) continue;
+		const double x = a.x() + (p.y() - a.y()) * (b.x() - a.x()) / (b.y() - a.y());
+		if (x >= p.x()) crossed.push_back(it->second);
+	}
+	std::sort(crossed.begin(), crossed.end());
+	for (std::size_t i = 0; i < crossed.size(); ) {
+		std::size_t j = i;
+		while (j < crossed.size() && crossed[j] == crossed[i]) j++;
+		if ((j - i) % 2 == 1) return true;
+		i = j;
+	}
+	return false;
+}
+
+bool IndexedMultiPolygon::crossesEdge(const Segment &s) const {
+	const Box box = geom::return_envelope<Box>(s);
+	for (auto it = edges.qbegin(boost::geometry::index::intersects(box)); it != edges.qend(); ++it)
+		if (geom::intersects(s, it->first)) return true;
+	return false;
+}
+
+bool IndexedMultiPolygon::crossesRing(const Ring &ring) const {
+	for (std::size_t i = 0; i + 1 < ring.size(); i++)
+		if (crossesEdge(Segment(ring[i], ring[i + 1]))) return true;
+	return false;
+}
+
+bool IndexedMultiPolygon::hasPolygonInside(const Polygon &poly) const {
+	// No edges cross (checked first), so each of our polygons is wholly
+	// inside `poly` or wholly outside it, and one vertex tells which.
+	for (const Point &vertex : polygonVertices)
+		if (geom::covered_by(vertex, poly)) return true;
+	return false;
+}
+
+bool IndexedMultiPolygon::intersects(const Point &p) const {
+	return covers(p);
+}
+
+bool IndexedMultiPolygon::intersects(const Box &box) const {
+	// An edge in or across the box, or the box wholly inside.
+	for (auto it = edges.qbegin(boost::geometry::index::intersects(box)); it != edges.qend(); ++it)
+		if (geom::intersects(it->first, box)) return true;
+	return covers(box.min_corner());
+}
+
+bool IndexedMultiPolygon::intersects(const Linestring &ls) const {
+	if (ls.empty()) return false;
+	for (std::size_t i = 0; i + 1 < ls.size(); i++)
+		if (crossesEdge(Segment(ls[i], ls[i + 1]))) return true;
+	// No crossing: the line is wholly inside or wholly outside.
+	return covers(ls.front());
+}
+
+bool IndexedMultiPolygon::intersects(const MultiLinestring &mls) const {
+	for (const Linestring &ls : mls)
+		if (intersects(ls)) return true;
+	return false;
+}
+
+bool IndexedMultiPolygon::intersects(const Polygon &poly) const {
+	if (poly.outer().empty()) return false;
+	if (crossesRing(poly.outer())) return true;
+	for (const Ring &inner : poly.inners())
+		if (crossesRing(inner)) return true;
+	// No crossing: poly is wholly inside us, or one of our polygons is wholly
+	// inside poly, or they're apart.
+	return covers(poly.outer().front()) || hasPolygonInside(poly);
+}
+
+bool IndexedMultiPolygon::intersects(const MultiPolygon &other) const {
+	for (const Polygon &poly : other)
+		if (intersects(poly)) return true;
+	return false;
+}
+

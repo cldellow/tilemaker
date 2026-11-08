@@ -2,6 +2,7 @@
 #include "helpers.h"
 #include <iostream>
 #include <cmath>
+#include <stdexcept>
 
 using namespace sqlite;
 using namespace std;
@@ -9,7 +10,12 @@ using namespace std;
 MBTiles::MBTiles():
   pendingStatements1(std::make_shared<std::vector<PendingStatement>>()),
   pendingStatements2(std::make_shared<std::vector<PendingStatement>>()),
-  pendingBytes(0)
+  pendingBytes(0),
+  batches([this](PendingStatement& stmt) {
+      const std::lock_guard<std::mutex> lock(m);
+      insertOrReplace(stmt.zoom, stmt.x, stmt.y, stmt.data, stmt.isMerge);
+    },
+    [](const PendingStatement& stmt) { return sizeof(PendingStatement) + stmt.data.size(); })
 {}
 
 // At most this much is buffered while SQLite is busy; beyond it, workers wait
@@ -21,7 +27,14 @@ static size_t pendingCost(const std::string& data) {
 }
 
 MBTiles::~MBTiles() {
-	if (db && inTransaction) db << "COMMIT;"; // commit all the changes if open
+	// commit all the changes if open (closeForWriting normally does this, and reports errors)
+	if (db && inTransaction) {
+		try {
+			db << "COMMIT;";
+		} catch (const std::exception &e) {
+			cerr << "Couldn't commit .mbtiles: " << e.what() << endl;
+		}
+	}
 }
 
 // ---- Write .mbtiles
@@ -90,12 +103,19 @@ void MBTiles::flushPendingStatements() {
 }
 	
 void MBTiles::saveTile(int zoom, int x, int y, string *data, bool isMerge) {
-	// If the lock is available, write directly to SQLite.
-	if (m.try_lock()) {
-		insertOrReplace(zoom, x, y, *data, isMerge);
-		flushPendingStatements();
-		m.unlock();
+	if (batches.inBatch()) {
+		batches.add({zoom, x, y, *data, isMerge});
 		return;
+	}
+
+	// If the lock is available, write directly to SQLite.
+	{
+		std::unique_lock<std::mutex> dbLock(m, std::try_to_lock);
+		if (dbLock.owns_lock()) {
+			insertOrReplace(zoom, x, y, *data, isMerge);
+			flushPendingStatements();
+			return;
+		}
 	}
 
 	{
@@ -115,9 +135,14 @@ void MBTiles::saveTile(int zoom, int x, int y, string *data, bool isMerge) {
 }
 
 void MBTiles::closeForWriting() {
+	if (!batches.allWritten()) throw std::runtime_error("MBTiles: a batch of tiles was never written - please file an issue");
 	flushPendingStatements();
 	preparedStatements[0].used(true);
 	preparedStatements[1].used(true);
+	if (inTransaction) {
+		inTransaction = false;
+		db << "COMMIT;";
+	}
 }
 
 // ---- Read mbtiles
@@ -132,6 +157,15 @@ void MBTiles::readBoundingBox(double &minLon, double &maxLon, double &minLat, do
 	vector<string> b = split_string(boundsStr,',');
 	minLon = stod(b[0]); minLat = stod(b[1]);
 	maxLon = stod(b[2]); maxLat = stod(b[3]);
+}
+
+bool MBTiles::readMetadata(const string &key, string &value) {
+	bool found = false;
+	db << "SELECT value FROM metadata WHERE name=?" << key >> [&](string v) {
+		value = v;
+		found = true;
+	};
+	return found;
 }
 
 void MBTiles::readTileList(std::vector<std::tuple<int,int,int>> &tileList) {

@@ -205,7 +205,101 @@ MU_TEST(test_merge_nearby_boxes) {
 	mu_check(sameBox(chain[0], Box(Point(0, 0), Point(40, 10))));
 }
 
+// IndexedMultiPolygon::intersects must agree with geom::intersects. The
+// multipolygon: a square with a square hole, an island in the hole, and a
+// separate triangle; queries on, in, across and around every part.
+MU_TEST(test_indexed_multipolygon) {
+	MultiPolygon mp = fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(3 3,7 3,7 7,3 7,3 3)),"
+	                          "((4 4,4 6,6 6,6 4,4 4)),((20 0,25 8,30 0,20 0)))");
+	mu_check(geom::is_valid(mp));
+	IndexedMultiPolygon index(mp);
+
+	// Edge cases, checked by hand
+	mu_check(index.intersects(Point(1, 1)));       // inside
+	mu_check(!index.intersects(Point(3.5, 3.5)));  // in the hole
+	mu_check(index.intersects(Point(5, 5)));       // on the island
+	mu_check(index.intersects(Point(0, 5)));       // on the boundary
+	mu_check(index.intersects(Point(3, 5)));       // on the hole's boundary
+	mu_check(!index.intersects(Point(-1, 0)));     // outside, level with a vertex
+	mu_check(index.intersects(Point(1, 0)));       // on an edge, level with vertices
+	Linestring inHole; geom::read_wkt("LINESTRING(3.2 3.2,3.8 3.8)", inHole);
+	mu_check(!index.intersects(inHole));
+	Linestring touching; geom::read_wkt("LINESTRING(-1 10,0 10)", touching);
+	mu_check(index.intersects(touching));
+	Polygon around; geom::read_wkt("POLYGON((-5 -5,-5 50,50 50,50 -5,-5 -5))", around);
+	mu_check(index.intersects(around));            // contains everything
+	Polygon aroundIsland; geom::read_wkt("POLYGON((3.5 3.5,3.5 6.5,6.5 6.5,6.5 3.5,3.5 3.5))", aroundIsland);
+	mu_check(index.intersects(aroundIsland));      // in the hole, around the island
+	mu_check(index.intersects(Box(Point(1, 1), Point(2, 2))));   // box inside
+	mu_check(!index.intersects(Box(Point(11, 1), Point(19, 2)))); // box between
+
+	// Nested shells (invalid, but common in OSM, e.g. Cleveland National
+	// Forest): a point in two polygons at once is inside, as geom::intersects says
+	MultiPolygon nested;
+	geom::read_wkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0)),((2 2,2 8,8 8,8 2,2 2)))", nested);
+	IndexedMultiPolygon nestedIndex(nested);
+	mu_check(geom::intersects(Point(5, 5), nested));
+	mu_check(nestedIndex.intersects(Point(5, 5)));
+	Linestring inBoth; geom::read_wkt("LINESTRING(4 4,6 6)", inBoth);
+	mu_check(nestedIndex.intersects(inBoth) == geom::intersects(inBoth, nested));
+
+	// Many queries, against geom::intersects
+	unsigned seed = 1;
+	auto rnd = [&](double lo, double hi) {
+		seed = seed * 1103515245u + 12345u;
+		return lo + (hi - lo) * ((seed >> 8) & 0xffff) / 65535.0;
+	};
+	for (int i = 0; i < 2000; i++) {
+		const Point p(rnd(-2, 32), rnd(-2, 12));
+		mu_check(index.intersects(p) == geom::intersects(p, mp));
+
+		Linestring ls;
+		ls.push_back(p);
+		ls.push_back(Point(p.x() + rnd(-3, 3), p.y() + rnd(-3, 3)));
+		ls.push_back(Point(p.x() + rnd(-3, 3), p.y() + rnd(-3, 3)));
+		mu_check(index.intersects(ls) == geom::intersects(ls, mp));
+
+		const double w = rnd(0, 4), h = rnd(0, 4);
+		const Box box(p, Point(p.x() + w, p.y() + h));
+		mu_check(index.intersects(box) == geom::intersects(box, mp));
+
+		Polygon tri;
+		geom::append(tri.outer(), p);
+		geom::append(tri.outer(), Point(p.x() + w, p.y()));
+		geom::append(tri.outer(), Point(p.x(), p.y() + h));
+		geom::append(tri.outer(), p);
+		geom::correct(tri);
+		mu_check(index.intersects(tri) == geom::intersects(tri, mp));
+	}
+}
+
+static double unionArea(std::vector<MultiPolygon> mps, std::size_t &polygons) {
+	union_many(mps);
+	polygons = mps[0].size();
+	return geom::area(mps[0]);
+}
+
+MU_TEST(test_union_many) {
+	std::size_t polygons;
+	// Overlapping squares become one polygon
+	const MultiPolygon s1 = fromWkt("MULTIPOLYGON(((0 0,0 2,2 2,2 0,0 0)))"), s2 = fromWkt("MULTIPOLYGON(((1 1,1 3,3 3,3 1,1 1)))");
+	mu_check(std::abs(unionArea({ s1, s2 }, polygons) - 7) < 1e-9 && polygons == 1);
+
+	// Two polygons sharing an edge along nearly collinear vertices: Boost's union_
+	// drops one of them or returns nothing, depending on the argument order
+	// (boostorg/geometry#1506). union_many sorts its input, so this is one fixed order;
+	// with Boost 1.83 both orders lose area, with 1.89 to 1.92 one of them.
+	const MultiPolygon a = fromWkt("MULTIPOLYGON(((7.5766965679702691 55.1955384390566266,7.5769710638206007 55.1955418668735760,"
+		"7.5776907371234223 55.1955508539257096,7.5777041477885838 55.1955510213938609,"
+		"7.5724506758568699 55.1833987553893692,7.5766965679702691 55.1955384390566266)))");
+	const MultiPolygon b = fromWkt("MULTIPOLYGON(((7.5776907371234223 55.1955508539257096,7.5769710638206007 55.1955418668735760,"
+		"7.5786734102424926 55.1979584470965179,7.5776907371234223 55.1955508539257096)))");
+	const double expected = geom::area(a) + geom::area(b);
+	mu_check(std::abs(unionArea({ a, b }, polygons) - expected) < 1e-6 * expected);
+}
+
 MU_TEST_SUITE(test_suite_geom) {
+	MU_RUN_TEST(test_union_many);
 	MU_RUN_TEST(test_rect_clip_concave);
 	MU_RUN_TEST(test_rect_clip_holes);
 	MU_RUN_TEST(test_rect_clip_trivial);
@@ -217,6 +311,7 @@ MU_TEST_SUITE(test_suite_geom) {
 	MU_RUN_TEST(test_simplify_no_holes);
 	MU_RUN_TEST(test_simplify_hole_near_outer);
 	MU_RUN_TEST(test_merge_nearby_boxes);
+	MU_RUN_TEST(test_indexed_multipolygon);
 }
 
 int main() {

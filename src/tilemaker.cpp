@@ -157,9 +157,9 @@ int main(const int argc, const char* argv[]) {
 	bool hasClippingBox = false;
 	Box clippingBox;
 	double minLon=std::numeric_limits<double>::max(),
-				 maxLon=std::numeric_limits<double>::min(),
+				 maxLon=std::numeric_limits<double>::lowest(),
 				 minLat=std::numeric_limits<double>::max(),
-				 maxLat=std::numeric_limits<double>::min();
+				 maxLat=std::numeric_limits<double>::lowest();
 	if (!bboxElements.empty()) {
 		hasClippingBox = true;
 		minLon = bboxElementFromStr(bboxElements.at(0));
@@ -199,8 +199,15 @@ int main(const int argc, const char* argv[]) {
 		rapidjson::FileReadStream is(fp.get(), readBuffer, sizeof(readBuffer));
 		jsonConfig.ParseStream(is);
 		if (jsonConfig.HasParseError()) {
+			// Translate the byte offset into line/column (re-read in the same text mode as openFile)
+			size_t line = 1, column = 1;
+			ifstream jsonFile(options.jsonFile);
+			char c;
+			for (size_t i = 0; i < jsonConfig.GetErrorOffset() && jsonFile.get(c); i++) {
+				if (c == '\n') { line++; column = 1; } else column++;
+			}
 			cerr << "Invalid JSON file: " << rapidjson::GetParseError_En(jsonConfig.GetParseError())
-			     << " at offset " << jsonConfig.GetErrorOffset() << "." << endl;
+			     << " at line " << line << ", column " << column << "." << endl;
 			return -1;
 		}
 
@@ -346,29 +353,35 @@ int main(const int argc, const char* argv[]) {
 		if (!infile) { cerr << "Couldn't open .pbf file " << inputFile << endl; return -1; }
 		
 		const bool hasSortTypeThenID = PbfHasOptionalFeature(inputFile, OptionSortTypeThenID);
-		int ret = pbfProcessor.ReadPbfFile(
-			nodeStore->shards(),
-			hasSortTypeThenID,
-			significantNodeTags,
-			significantWayTags,
-			options.threadNum,
-			[&]() {
-				thread_local std::pair<std::string, std::shared_ptr<ifstream>> pbfStream;
-				if (pbfStream.first != inputFile) {
-					pbfStream = std::make_pair(inputFile, std::make_shared<ifstream>(inputFile, ios::in | ios::binary));
-				}
-				return pbfStream.second;
-			},
-			[&]() {
-				thread_local std::pair<std::string, std::shared_ptr<OsmLuaProcessing>> osmLuaProcessing;
-				if (osmLuaProcessing.first != inputFile) {
-					osmLuaProcessing = std::make_pair(inputFile, std::make_shared<OsmLuaProcessing>(osmStore, config, layers, options.luaFile, shpMemTiles, osmMemTiles, attributeStore, declutter, options.osm.materializeGeometries, false));
-				}
-				return osmLuaProcessing.second;
-			},
-			*nodeStore,
-			*wayStore
-		);
+		int ret;
+		try {
+			ret = pbfProcessor.ReadPbfFile(
+				nodeStore->shards(),
+				hasSortTypeThenID,
+				significantNodeTags,
+				significantWayTags,
+				options.threadNum,
+				[&]() {
+					thread_local std::pair<std::string, std::shared_ptr<ifstream>> pbfStream;
+					if (pbfStream.first != inputFile) {
+						pbfStream = std::make_pair(inputFile, std::make_shared<ifstream>(inputFile, ios::in | ios::binary));
+					}
+					return pbfStream.second;
+				},
+				[&]() {
+					thread_local std::pair<std::string, std::shared_ptr<OsmLuaProcessing>> osmLuaProcessing;
+					if (osmLuaProcessing.first != inputFile) {
+						osmLuaProcessing = std::make_pair(inputFile, std::make_shared<OsmLuaProcessing>(osmStore, config, layers, options.luaFile, shpMemTiles, osmMemTiles, attributeStore, declutter, options.osm.materializeGeometries, false));
+					}
+					return osmLuaProcessing.second;
+				},
+				*nodeStore,
+				*wayStore
+			);
+		} catch (const std::exception& e) {
+			cerr << endl << "Error reading " << inputFile << ": " << e.what() << endl;
+			return -1;
+		}
 		if (ret != 0) return ret;
 	} 
 	attributeStore.finalize();
@@ -514,14 +527,27 @@ int main(const int argc, const char* argv[]) {
 	sortTileCoordinates(config.baseZoom, options.threadNum, tileCoordinates);
 
 	std::atomic<uint64_t> batchCounter(0);
+	// First error from a tile-writing worker; reported after pool.join()
+	// (an exception escaping a pool thread would call std::terminate)
+	std::atomic<bool> tileFailed(false);
+	std::string tileError;
+	std::mutex tileErrorMutex;
+	auto recordTileError = [&](unsigned int zoom, TileCoordinates coords, const std::string& what) {
+		const std::lock_guard<std::mutex> lock(tileErrorMutex);
+		if (tileFailed) return;
+		tileError = "z" + std::to_string(zoom) + "/" + std::to_string(coords.x) + "/" + std::to_string(coords.y) + ": " + what;
+		tileFailed = true;
+	};
 	const uint cutZoom = std::max<uint>(12, config.startZoom);
 	// Batches are handed out as threads become free rather than all posted up
 	// front: a planet has ~14M of them, and their queued handlers held GBs.
 	std::mutex batchMutex;
 	std::size_t nextBatchStart = 0;
-	auto nextBatch = [&](std::size_t &startIndex, std::size_t &batchSize) {
+	uint64_t nextBatchSeq = 0;
+	auto nextBatch = [&](std::size_t &startIndex, std::size_t &batchSize, uint64_t &seq) {
 		const std::lock_guard<std::mutex> lock(batchMutex);
 		startIndex = nextBatchStart;
+		seq = nextBatchSeq++;
 		// Compute how many tiles should be assigned to this batch --
 		// higher-zoom tiles are cheaper to compute, lower-zoom tiles more expensive.
 		batchSize = 0;
@@ -549,16 +575,32 @@ int main(const int argc, const char* argv[]) {
 		return batchSize > 0;
 	};
 
+	// .pmtiles and .mbtiles are written in batch order, so the file doesn't depend on thread scheduling
+	const bool toPMTiles = options.outputMode == OptionsParser::OutputMode::PMTiles;
+	const bool toMBTiles = options.outputMode == OptionsParser::OutputMode::MBTiles;
+	// While an earlier batch is still being worked on, each thread may run ahead by about
+	// 64 MB of finished tiles. With less, threads often wait for a slow batch (mostly a
+	// dense z12 area), above all when two threads share a core and each runs at half speed.
+	const uint64_t maxHeldBytes = (64ull << 20) * options.threadNum;
+	if (toPMTiles) sharedData.pmtiles.batches.setMaxHeldBytes(maxHeldBytes);
+	if (toMBTiles) sharedData.mbtiles.batches.setMaxHeldBytes(maxHeldBytes);
 	for (unsigned int t = 0; t < options.threadNum; t++) {
 		boost::asio::post(pool, [&]() {
 			std::size_t startIndex, batchSize;
-			while (nextBatch(startIndex, batchSize)) {
+			uint64_t seq;
+			while (true) {
+				if (toPMTiles) sharedData.pmtiles.batches.waitForRoom();
+				if (toMBTiles) sharedData.mbtiles.batches.waitForRoom();
+				if (!nextBatch(startIndex, batchSize, seq)) break;
+				if (toPMTiles) sharedData.pmtiles.batches.begin(seq);
+				if (toMBTiles) sharedData.mbtiles.batches.begin(seq);
 				clipCacheBatchId = ++batchCounter;
 				// A single-tile batch has no descendants to reuse its clips.
 				clipCacheNoStore = batchSize == 1;
 				std::vector<std::string> tileTimings;
 				std::size_t endIndex = std::min(tileCoordinates.size(), startIndex + batchSize);
 				for(std::size_t i = startIndex; i < endIndex; ++i) {
+					if (tileFailed) return;
 					unsigned int zoom = tileCoordinates[i].first;
 					TileCoordinates coords = tileCoordinates[i].second;
 
@@ -568,11 +610,19 @@ int main(const int argc, const char* argv[]) {
 						clock_gettime(CLOCK_MONOTONIC, &start);
 #endif
 
-					std::vector<std::vector<OutputObjectID>> data;
-					for (auto source : sources) {
-						data.emplace_back(source->getObjectsForTile(sortOrders, zoom, coords));
+					try {
+						std::vector<std::vector<OutputObjectID>> data;
+						for (auto source : sources) {
+							data.emplace_back(source->getObjectsForTile(sortOrders, attributeStore, zoom, coords));
+						}
+						outputProc(sharedData, sources, attributeStore, data, coords, zoom);
+					} catch (const std::exception& e) {
+						recordTileError(zoom, coords, e.what());
+						return;
+					} catch (...) {
+						recordTileError(zoom, coords, "unknown exception");
+						return;
 					}
-					outputProc(sharedData, sources, attributeStore, data, coords, zoom);
 
 #ifdef CLOCK_MONOTONIC
 					if (options.logTileTimings) {
@@ -591,6 +641,8 @@ int main(const int argc, const char* argv[]) {
 						std::cout << output << std::endl;
 				}
 
+				if (toPMTiles) sharedData.pmtiles.batches.end();
+				if (toMBTiles) sharedData.mbtiles.batches.end();
 				tilesWritten += (endIndex - startIndex); 
 
 				if (io_mutex.try_lock()) {
@@ -616,18 +668,27 @@ int main(const int argc, const char* argv[]) {
 	}
 	// Wait for all tasks in the pool to complete.
 	pool.join();
+	if (tileFailed) {
+		cerr << endl << "Error writing tile " << tileError << endl;
+		return -1;
+	}
 
 	// ----	Close tileset
 
-	if (options.outputMode == OptionsParser::OutputMode::MBTiles) {
-		sharedData.writeMBTilesMetadata(jsonConfig);
-		sharedData.mbtiles.closeForWriting();
-	} else if (options.outputMode == OptionsParser::OutputMode::PMTiles) {
-		sharedData.writePMTilesBounds();
-		std::string metadata = sharedData.pmTilesMetadata(jsonConfig);
-		sharedData.pmtiles.close(metadata);
-	} else {
-		sharedData.writeFileMetadata(jsonConfig);
+	try {
+		if (options.outputMode == OptionsParser::OutputMode::MBTiles) {
+			sharedData.writeMBTilesMetadata(jsonConfig);
+			sharedData.mbtiles.closeForWriting();
+		} else if (options.outputMode == OptionsParser::OutputMode::PMTiles) {
+			sharedData.writePMTilesBounds();
+			std::string metadata = sharedData.pmTilesMetadata(jsonConfig);
+			sharedData.pmtiles.close(metadata);
+		} else {
+			sharedData.writeFileMetadata(jsonConfig);
+		}
+	} catch (const std::exception& e) {
+		cerr << endl << "Error writing " << sharedData.outputFile << ": " << e.what() << endl;
+		return -1;
 	}
 
 #ifndef _MSC_VER
