@@ -543,9 +543,11 @@ int main(const int argc, const char* argv[]) {
 	// front: a planet has ~14M of them, and their queued handlers held GBs.
 	std::mutex batchMutex;
 	std::size_t nextBatchStart = 0;
-	auto nextBatch = [&](std::size_t &startIndex, std::size_t &batchSize) {
+	uint64_t nextBatchSeq = 0;
+	auto nextBatch = [&](std::size_t &startIndex, std::size_t &batchSize, uint64_t &seq) {
 		const std::lock_guard<std::mutex> lock(batchMutex);
 		startIndex = nextBatchStart;
+		seq = nextBatchSeq++;
 		// Compute how many tiles should be assigned to this batch --
 		// higher-zoom tiles are cheaper to compute, lower-zoom tiles more expensive.
 		batchSize = 0;
@@ -573,10 +575,25 @@ int main(const int argc, const char* argv[]) {
 		return batchSize > 0;
 	};
 
+	// .pmtiles and .mbtiles are written in batch order, so the file doesn't depend on thread scheduling
+	const bool toPMTiles = options.outputMode == OptionsParser::OutputMode::PMTiles;
+	const bool toMBTiles = options.outputMode == OptionsParser::OutputMode::MBTiles;
+	// While an earlier batch is still being worked on, each thread may run ahead by about
+	// 64 MB of finished tiles. With less, threads often wait for a slow batch (mostly a
+	// dense z12 area), above all when two threads share a core and each runs at half speed.
+	const uint64_t maxHeldBytes = (64ull << 20) * options.threadNum;
+	if (toPMTiles) sharedData.pmtiles.batches.setMaxHeldBytes(maxHeldBytes);
+	if (toMBTiles) sharedData.mbtiles.batches.setMaxHeldBytes(maxHeldBytes);
 	for (unsigned int t = 0; t < options.threadNum; t++) {
 		boost::asio::post(pool, [&]() {
 			std::size_t startIndex, batchSize;
-			while (nextBatch(startIndex, batchSize)) {
+			uint64_t seq;
+			while (true) {
+				if (toPMTiles) sharedData.pmtiles.batches.waitForRoom();
+				if (toMBTiles) sharedData.mbtiles.batches.waitForRoom();
+				if (!nextBatch(startIndex, batchSize, seq)) break;
+				if (toPMTiles) sharedData.pmtiles.batches.begin(seq);
+				if (toMBTiles) sharedData.mbtiles.batches.begin(seq);
 				clipCacheBatchId = ++batchCounter;
 				// A single-tile batch has no descendants to reuse its clips.
 				clipCacheNoStore = batchSize == 1;
@@ -624,6 +641,8 @@ int main(const int argc, const char* argv[]) {
 						std::cout << output << std::endl;
 				}
 
+				if (toPMTiles) sharedData.pmtiles.batches.end();
+				if (toMBTiles) sharedData.mbtiles.batches.end();
 				tilesWritten += (endIndex - startIndex); 
 
 				if (io_mutex.try_lock()) {
