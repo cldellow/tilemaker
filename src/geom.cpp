@@ -146,10 +146,13 @@ MultiPolygon simplify(MultiPolygon const &mp, double max_distance)
 	return result_mp;
 }
 
+static bool repairHolesLocally(const Polygon &p, MultiPolygon &result);
+
 void make_valid(MultiPolygon &mp)
 {
 	MultiPolygon result;
 	for(auto const &p: mp) {
+		if (repairHolesLocally(p, result)) continue;
 		geometry::correct(p, result, 1E-12);
 	}
 	mp = result;
@@ -674,6 +677,97 @@ bool multiPolygonClear(const MultiPolygon &mp, PrecheckScratch &scratch) {
 }
 
 } // namespace
+
+namespace {
+
+const std::size_t kLocalRepairMinHoles = 32;
+
+// The rings of p that are not clearly fine on their own and clear of the
+// others (ring 0 = the outer ring, i + 1 = hole i): a ring failing ringClear,
+// or one of a pair of segments that are not clearly disjoint. Answers false if
+// that can't be told.
+bool troubleRings(const Polygon &p, PrecheckScratch &scratch, std::vector<uint32_t> &trouble) {
+	const auto &inners = p.inners();
+	if (inners.size() + 1 >= std::numeric_limits<uint32_t>::max()) return false;
+	double maxAbs = 0;
+	if (!ringFinite(p.outer(), maxAbs)) return false;
+	for (const auto &inner : inners)
+		if (!ringFinite(inner, maxAbs)) return false;
+	const double tol = kPrecheckEps * std::max(1.0, maxAbs);
+
+	std::vector<PrecheckSeg> &segs = scratch.segs;
+	segs.clear();
+	trouble.clear();
+	PrecheckBox box;
+	for (std::size_t r = 0; r <= inners.size(); r++) {
+		const std::size_t first = segs.size();
+		if (!ringClear(r == 0 ? p.outer() : inners[r - 1], r != 0, tol, static_cast<uint32_t>(r), segs, box)) {
+			segs.resize(first);
+			trouble.push_back(static_cast<uint32_t>(r));
+		}
+	}
+	const std::size_t n = segs.size();
+	std::sort(segs.begin(), segs.end(), [](const PrecheckSeg &a, const PrecheckSeg &b) { return a.minX < b.minX; });
+	for (std::size_t i = 0; i < n; i++) {
+		const double limit = segs[i].maxX + tol;
+		for (std::size_t j = i + 1; j < n && segs[j].minX <= limit; j++)
+			if (!segsClear(segs[i], segs[j], tol)) {
+				trouble.push_back(segs[i].ring);
+				trouble.push_back(segs[j].ring);
+			}
+	}
+	std::sort(trouble.begin(), trouble.end());
+	trouble.erase(std::unique(trouble.begin(), trouble.end()), trouble.end());
+	return true;
+}
+
+} // namespace
+
+// make_valid for a polygon with many holes, a few of which overlap or touch
+// each other, the outer ring being fine (e.g. Lake Huron, relation 1205151:
+// 14,117 holes, two of them sharing an edge). geometry::correct subtracts all
+// the holes from the outer ring, matching each one against the whole outer
+// ring: 13 s there. A hole clear of every other ring, and inside the outer
+// ring, stays a hole of the result as it is, so this unions only the other
+// holes (as geometry::correct does: the same result) and adds them back as
+// holes. It keeps the result only if the precheck proves it valid; otherwise
+// (or if the outer ring or more than a quarter of the holes are involved)
+// it answers false and make_valid corrects the whole polygon.
+static bool repairHolesLocally(const Polygon &p, MultiPolygon &result) {
+	const auto &inners = p.inners();
+	if (inners.size() < kLocalRepairMinHoles) return false;
+	std::vector<uint32_t> trouble;
+	const bool found = troubleRings(p, precheckScratch, trouble);
+	precheckScratch.trim();
+	if (!found || trouble.empty() || trouble[0] == 0 || trouble.size() * 4 > inners.size()) return false;
+
+	// Union of the troubled holes, each corrected as a polygon of its own
+	MultiPolygon holes, merged;
+	for (uint32_t r : trouble) {
+		Polygon h;
+		h.outer() = inners[r - 1];
+		holes.push_back(std::move(h));
+	}
+	geometry::correct(holes, merged, 1E-12);
+
+	Polygon repaired;
+	repaired.outer() = p.outer();
+	std::size_t t = 0;
+	for (std::size_t i = 0; i < inners.size(); i++) {
+		if (t < trouble.size() && trouble[t] == i + 1) { t++; continue; }
+		repaired.inners().push_back(inners[i]);
+	}
+	for (auto &m : merged) {
+		// Land inside a merged hole would be a polygon of its own: leave that to geometry::correct
+		if (!m.inners().empty()) return false;
+		Ring hole = std::move(m.outer());
+		std::reverse(hole.begin(), hole.end()); // an outer ring's orientation, reversed for a hole
+		repaired.inners().push_back(std::move(hole));
+	}
+	if (!polygonDefinitelyValid(repaired)) return false;
+	result.push_back(std::move(repaired));
+	return true;
+}
 
 bool polygonDefinitelyValid(const Polygon &p) {
 	PrecheckBox box;

@@ -2,6 +2,8 @@
 #include <cmath>
 #include "external/minunit.h"
 #include "geom.h"
+#include "geometry/correct.hpp"
+#include <algorithm>
 
 static MultiPolygon fromWkt(const char *wkt) {
 	MultiPolygon mp;
@@ -160,6 +162,81 @@ static Ring squareRing(double x, double y, double size) {
 	geom::append(r, Point(x + size, y + size)); geom::append(r, Point(x, y + size));
 	geom::append(r, Point(x, y));
 	return r;
+}
+
+// make_valid must give a valid polygon covering what geometry::correct's does
+static void checkMakeValid(const Polygon &p) {
+	MultiPolygon fast; fast.push_back(p);
+	make_valid(fast);
+	MultiPolygon full;
+	geometry::correct(p, full, 1E-12);
+	mu_check(geom::is_valid(fast));
+	MultiPolygon sym;
+	geom::sym_difference(fast, full, sym);
+	mu_check(std::abs(geom::area(sym)) < 1e-9);
+	mu_check(std::abs(geom::area(fast) - geom::area(full)) < 1e-9);
+}
+
+// A 10x10 grid of unit holes in a 0..100 square; hole (i, j) at (2 + 5i, 2 + 5j)
+static Polygon gridOfHoles() {
+	Polygon p;
+	geom::read_wkt("POLYGON((0 0,0 100,100 100,100 0,0 0))", p);
+	for (int i = 0; i < 10; i++)
+		for (int j = 0; j < 10; j++) {
+			Ring hole = squareRing(2 + i * 5, 2 + j * 5, 1);
+			std::reverse(hole.begin(), hole.end());
+			p.inners().push_back(hole);
+		}
+	MultiPolygon mp; mp.push_back(p); geom::correct(mp);
+	return mp[0];
+}
+
+MU_TEST(test_make_valid_local_holes) {
+	// Two holes sharing an edge: repaired locally, as one hole
+	Polygon p = gridOfHoles();
+	{
+		Ring extra = squareRing(3, 2, 1); // shares the edge x = 3 with hole (0, 0)
+		std::reverse(extra.begin(), extra.end());
+		p.inners().push_back(extra);
+	}
+	mu_check(!geom::is_valid(p));
+	checkMakeValid(p);
+	{
+		MultiPolygon fast; fast.push_back(p); make_valid(fast);
+		mu_check(fast.size() == 1 && fast[0].inners().size() == 100); // 101 holes, two merged
+	}
+
+	// Two overlapping holes
+	Polygon q = gridOfHoles();
+	{
+		Ring extra = squareRing(2.5, 2.5, 1);
+		std::reverse(extra.begin(), extra.end());
+		q.inners().push_back(extra);
+	}
+	mu_check(!geom::is_valid(q));
+	checkMakeValid(q);
+
+	// A hole crossing the outer ring: the whole polygon is corrected
+	Polygon r = gridOfHoles();
+	{
+		Ring extra = squareRing(99, 50, 2);
+		std::reverse(extra.begin(), extra.end());
+		r.inners().push_back(extra);
+	}
+	mu_check(!geom::is_valid(r));
+	checkMakeValid(r);
+
+	// Four holes enclosing a square of land between them (a ring of holes):
+	// the land is a polygon of its own, left to geometry::correct
+	Polygon u = gridOfHoles();
+	for (const char *wkt : { "POLYGON((60 60,60 70,62 70,62 60,60 60))", "POLYGON((68 60,68 70,70 70,70 60,68 60))",
+	                         "POLYGON((60 60,60 62,70 62,70 60,60 60))", "POLYGON((60 68,60 70,70 70,70 68,60 68))" }) {
+		Polygon h; geom::read_wkt(wkt, h);
+		Ring hole = h.outer();
+		std::reverse(hole.begin(), hole.end());
+		u.inners().push_back(hole);
+	}
+	checkMakeValid(u);
 }
 
 MU_TEST(test_precheck_large_polygon) {
@@ -366,6 +443,7 @@ MU_TEST_SUITE(test_suite_geom) {
 	MU_RUN_TEST(test_precheck_many_holes);
 	MU_RUN_TEST(test_precheck_large_polygon);
 	MU_RUN_TEST(test_precheck_touching_rings);
+	MU_RUN_TEST(test_make_valid_local_holes);
 	MU_RUN_TEST(test_simplify_no_holes);
 	MU_RUN_TEST(test_simplify_hole_near_outer);
 	MU_RUN_TEST(test_merge_nearby_boxes);
