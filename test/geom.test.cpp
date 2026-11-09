@@ -116,6 +116,44 @@ MU_TEST(test_precheck_many_holes) {
 	checkPrecheck(mp, false);
 }
 
+MU_TEST(test_precheck_touching_rings) {
+	// Two holes touching at one vertex: valid (Boost allows it), and now provable
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(2 2,2 4,4 4,4 2,2 2),(4 4,4 6,6 6,6 4,4 4)))"), true);
+	// A hole touching the outer ring at one of its vertices (a corner)
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(0 0,3 1,1 3,0 0)))"), true);
+	// A hole touching the middle of the outer ring's edge: valid, but not a shared
+	// vertex, so still too close to call
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(0 5,3 7,3 3,0 5)))"), false);
+	// A chain of three holes, each touching the next: still no cycle
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(1 1,1 3,3 3,3 1,1 1),(3 3,3 5,5 5,5 3,3 3),(5 5,5 7,7 7,7 5,5 5)))"), true);
+	// Two holes touching at two vertices cut off the space between them: a cycle
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(2 2,2 8,4 5,2 2),(2 2,6 5,2 8,8 8,8 2,2 2)))"), false);
+	// A hole touching the outer ring at two vertices splits the interior
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(0 5,5 10,5 5,0 5)))"), false);
+	// Two holes along y = 5, each touching the outer ring and each other: the chain
+	// outer-hole-hole-outer cuts the square in two (a cycle through the outer ring)
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(0 5,2.5 6,5 5,0 5),(5 5,7.5 6,10 5,5 5)))"), false);
+	// Two holes crossing at a shared vertex (an X): invalid
+	{
+		Polygon p;
+		geom::read_wkt("POLYGON((0 0,0 10,10 10,10 0,0 0),(5 5,3 7,7 7,5 5),(5 5,3 3,7 3,5 5))", p);
+		MultiPolygon mp; mp.push_back(p); geom::correct(mp);
+		// These two only touch (one above, one below 5 5): valid
+		checkPrecheck(mp, true);
+		Polygon q;
+		// Two holes sharing 5 5 where the second passes through the first's angle there
+		geom::read_wkt("POLYGON((0 0,0 10,10 10,10 0,0 0),(5 5,2 6,8 7,5 5),(5 5,2 8,8 4,5 5))", q);
+		MultiPolygon mq; mq.push_back(q); geom::correct(mq);
+		checkPrecheck(mq, false);
+	}
+	// A hole touching itself (a ring through the same vertex twice) stays unsure
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(2 2,2 5,5 5,2 2,5 2,5 0.5,2 2)))"), false);
+	// Two holes sharing an edge overlap along it: invalid, and not a vertex touch
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(2 2,2 4,4 4,4 2,2 2),(4 2,4 4,6 4,6 2,4 2)))"), false);
+	// A hole that touches another and lies inside it: nested, invalid
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(1 1,1 9,9 9,9 1,1 1),(1 1,3 4,4 3,1 1)))"), false);
+}
+
 static Ring squareRing(double x, double y, double size) {
 	Ring r;
 	geom::append(r, Point(x, y)); geom::append(r, Point(x + size, y));
@@ -327,6 +365,7 @@ MU_TEST_SUITE(test_suite_geom) {
 	MU_RUN_TEST(test_precheck_overlapping_bboxes);
 	MU_RUN_TEST(test_precheck_many_holes);
 	MU_RUN_TEST(test_precheck_large_polygon);
+	MU_RUN_TEST(test_precheck_touching_rings);
 	MU_RUN_TEST(test_simplify_no_holes);
 	MU_RUN_TEST(test_simplify_hole_near_outer);
 	MU_RUN_TEST(test_merge_nearby_boxes);
