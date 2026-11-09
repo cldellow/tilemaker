@@ -465,6 +465,9 @@ bool validTouches(std::vector<PrecheckTouch> &touches, std::size_t rings, std::v
 // crossing parity is exact; only the side of h is decided with a tolerance.
 inline int rayClearlyCrosses(const Point &h, const Point &a, const Point &b, double tol) {
 	const double hx = h.x(), hy = h.y();
+	// h on the segment's ring, at a vertex where two rings touch (validTouches):
+	// the crossing parity says nothing about which side h is on
+	if ((a.x() == hx && a.y() == hy) || (b.x() == hx && b.y() == hy)) return 0;
 	if ((a.y() > hy) == (b.y() > hy)) return -1;
 	if (std::max(a.x(), b.x()) < hx) return -1;
 	if (std::min(a.x(), b.x()) > hx) return 1;
