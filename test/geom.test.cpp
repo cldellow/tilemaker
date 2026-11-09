@@ -87,8 +87,18 @@ MU_TEST(test_precheck_overlapping_bboxes) {
 	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0)),((4 4,4 6,6 6,6 4,4 4)))"), false);
 	// Crossing polygons
 	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 4,4 4,4 0,0 0)),((2 2,2 6,6 6,6 2,2 2)))"), false);
-	// Touching at a vertex: valid, but too close to call
-	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,2 10,2 2,10 2,10 0,0 0)),((2 2,4 8,8 8,8 4,2 2)))"), false);
+	// Touching at a vertex
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,2 10,2 2,10 2,10 0,0 0)),((2 2,4 8,8 8,8 4,2 2)))"), true);
+	// Two squares touching at a corner (as clipping pinches a polygon in two)
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 5,5 5,5 0,0 0)),((5 5,5 10,10 10,10 5,5 5)))"), true);
+	// Two triangles touching at two vertices: a cycle, too close to call
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,5 5,0 0)),((0 0,5 5,0 10,-5 5,0 0)))"), false);
+	// Touching at a vertex where one polygon pokes into the other: overlap, invalid
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0)),((10 10,3 4,4 3,10 10)))"), false);
+	// A polygon touching a hole of another from inside it
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(2 2,8 2,8 8,2 8,2 2)),((2 2,5 3,3 5,2 2)))"), true);
+	// Touching at the middle of an edge: valid, but not a shared vertex
+	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0)),((10 5,15 8,15 2,10 5)))"), false);
 }
 
 MU_TEST(test_precheck_many_holes) {
@@ -170,6 +180,34 @@ static Ring squareRing(double x, double y, double size) {
 	geom::append(r, Point(x + size, y + size)); geom::append(r, Point(x, y + size));
 	geom::append(r, Point(x, y));
 	return r;
+}
+
+MU_TEST(test_rect_clip_many_holes) {
+	// A 2000-vertex outer ring (a circle) with 900 holes: enough holes inside the
+	// box that rect_clip places them with an index of the clipped outer ring
+	Polygon p;
+	const int n = 2000;
+	for (int i = n; i >= 0; i--) {
+		const double a = 2 * M_PI * (i % n) / n;
+		geom::append(p.outer(), Point(100 + 100 * std::cos(a), 100 + 100 * std::sin(a)));
+	}
+	for (int i = 0; i < 30; i++)
+		for (int j = 0; j < 30; j++) {
+			Ring hole = squareRing(40 + i * 4, 40 + j * 4, 1);
+			std::reverse(hole.begin(), hole.end());
+			p.inners().push_back(hole);
+		}
+	MultiPolygon mp; mp.push_back(p); geom::correct(mp);
+	mu_check(geom::is_valid(mp));
+	for (const Box &box : { Box(Point(50, 50), Point(150, 150)), Box(Point(-10, 62.5), Point(90, 210)), Box(Point(41.5, 41.5), Point(130, 77.5)) }) {
+		MultiPolygon clipped, expected;
+		mu_check(rect_clip(mp, box, clipped));
+		mu_check(geom::is_valid(clipped));
+		geom::intersection(mp, box, expected);
+		MultiPolygon sym;
+		geom::sym_difference(clipped, expected, sym);
+		mu_check(std::abs(geom::area(sym)) < 1e-6);
+	}
 }
 
 // make_valid must give a valid polygon covering what geometry::correct's does
@@ -452,6 +490,7 @@ MU_TEST_SUITE(test_suite_geom) {
 	MU_RUN_TEST(test_precheck_large_polygon);
 	MU_RUN_TEST(test_precheck_touching_rings);
 	MU_RUN_TEST(test_make_valid_local_holes);
+	MU_RUN_TEST(test_rect_clip_many_holes);
 	MU_RUN_TEST(test_simplify_no_holes);
 	MU_RUN_TEST(test_simplify_hole_near_outer);
 	MU_RUN_TEST(test_merge_nearby_boxes);

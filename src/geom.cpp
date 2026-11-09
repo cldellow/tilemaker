@@ -8,6 +8,7 @@
 
 #include "geometry/correct.hpp"
 #include <limits>
+#include <memory>
 
 #include <algorithm>
 #include <cmath>
@@ -392,9 +393,10 @@ inline const Point &farEnd(const PrecheckSeg &s, const Point &p) {
 //    of the same two rings) can cut a piece off the interior, which Boost calls
 //    invalid (failure_disconnected_interior); it answers "unsure" here.
 // Anything borderline answers false ("unsure"), as elsewhere in the precheck.
-// `ringPolygon` gives each ring's polygon; touches between polygons answer false.
+// The rings may belong to several polygons of a multipolygon, which may touch
+// each other likewise (their interiors being disjoint is checked separately).
 bool validTouches(std::vector<PrecheckTouch> &touches, std::size_t rings, std::vector<uint32_t> &ringSet,
-                  double tol, const std::vector<uint32_t> *ringPolygon = nullptr) {
+                  double tol) {
 	if (touches.empty()) return true;
 	std::sort(touches.begin(), touches.end(), [](const PrecheckTouch &a, const PrecheckTouch &b) {
 		return a.p.x() < b.p.x() || (a.p.x() == b.p.x() && a.p.y() < b.p.y());
@@ -429,7 +431,6 @@ bool validTouches(std::vector<PrecheckTouch> &touches, std::size_t rings, std::v
 		for (std::size_t k = i; k < j; k++)
 			if (!add(touches[k].s) || !add(touches[k].t)) return false;
 		if (!segA[1] || !segB[1]) return false;
-		if (ringPolygon && (*ringPolygon)[ringA] != (*ringPolygon)[ringB]) return false;
 
 		// 1. B's segments clearly inside one angle of A's
 		const Point &a1 = farEnd(*segAs[0], p), &a2 = farEnd(*segAs[1], p);
@@ -660,8 +661,10 @@ bool multiPolygonClear(const MultiPolygon &mp, PrecheckScratch &scratch) {
 		if (!polygonClear(p, scratch, box)) return false;
 	if (pairs.empty()) return true;
 
-	// No ring of one polygon touches a ring of another. (This re-tests the rings
-	// within each polygon too, at the multipolygon's possibly larger tolerance.)
+	// Rings of different polygons touch only at single shared vertices, without
+	// crossing and without forming a cycle with the other touches (validTouches).
+	// (This re-tests the rings within each polygon too, at the multipolygon's
+	// possibly larger tolerance.)
 	std::vector<PrecheckSeg> &segs = scratch.segs;
 	segs.clear();
 	uint32_t ringIdx = 0;
@@ -670,7 +673,8 @@ bool multiPolygonClear(const MultiPolygon &mp, PrecheckScratch &scratch) {
 		for (const auto &inner : p.inners())
 			if (!ringClear(inner, true, tol, ringIdx++, segs, box)) return false;
 	}
-	if (!segmentsClear(segs, tol)) return false;
+	if (!segmentsClear(segs, tol, &scratch.touches)) return false;
+	if (!validTouches(scratch.touches, ringIdx, scratch.ringSet, tol)) return false;
 
 	// Interiors are disjoint: neither polygon of an overlapping pair lies inside the other.
 	for (const auto &pr : pairs)
@@ -1359,6 +1363,93 @@ int ringInRing(const Ring &ring, const Ring &outer) {
 	return 0;
 }
 
+// pointInRing for many points against one large ring: its edges bucketed into
+// horizontal bands, so a point is tested against the edges of its band only.
+// Same answers as pointInRing: a crossing edge spans the point's y, and a
+// vertex geom::equals to the point is within `pad` of its y (far more than
+// Boost's tolerance), so both are among the edges of its band.
+class RingLocator {
+public:
+	explicit RingLocator(const Ring &ring): ring(ring) {
+		const std::size_t n = ring.size();
+		if (n == 0) return;
+		minY = std::numeric_limits<double>::infinity();
+		double maxY = -minY, maxAbs = 1;
+		for (const Point &p : ring) {
+			minY = std::min(minY, p.y()); maxY = std::max(maxY, p.y());
+			maxAbs = std::max(maxAbs, std::max(std::fabs(p.x()), std::fabs(p.y())));
+		}
+		pad = 1e-9 * maxAbs;
+		minY -= pad; maxY += pad;
+		bands = std::max<std::size_t>(1, n / 4);
+		// Fewer bands while long edges would make the index much bigger than the ring
+		for (;;) {
+			scale = bands / (maxY - minY);
+			std::size_t entries = 0;
+			forEachEdge([&](std::size_t, double lo, double hi) { entries += bandOf(hi + pad) - bandOf(lo - pad) + 1; });
+			if (entries <= 4 * n || bands == 1) break;
+			bands = (bands + 1) / 2;
+		}
+		start.assign(bands + 1, 0);
+		forEachEdge([&](std::size_t, double lo, double hi) {
+			for (std::size_t b = bandOf(lo - pad), e = bandOf(hi + pad); b <= e; b++) start[b + 1]++;
+		});
+		for (std::size_t b = 0; b < bands; b++) start[b + 1] += start[b];
+		std::vector<std::size_t> fill(start.begin(), start.end() - 1);
+		edges.resize(start[bands]);
+		forEachEdge([&](std::size_t i, double lo, double hi) {
+			for (std::size_t b = bandOf(lo - pad), e = bandOf(hi + pad); b <= e; b++) edges[fill[b]++] = static_cast<uint32_t>(i);
+		});
+	}
+
+	// As pointInRing(p, ring)
+	int locate(const Point &p) const {
+		if (ring.empty()) return -1;
+		bool in = false;
+		const std::size_t b = bandOf(p.y());
+		for (std::size_t k = start[b]; k < start[b + 1]; k++) {
+			const std::size_t i = edges[k], j = i == 0 ? ring.size() - 1 : i - 1;
+			const Point &a = ring[i], &c = ring[j];
+			if (geom::equals(a, p) || geom::equals(c, p)) return 0;
+			if ((a.y() > p.y()) != (c.y() > p.y())) {
+				const double x = a.x() + (p.y() - a.y()) * (c.x() - a.x()) / (c.y() - a.y());
+				if (x == p.x()) return 0;
+				if (x > p.x()) in = !in;
+			}
+		}
+		return in ? 1 : -1;
+	}
+
+	// As ringInRing(r, ring)
+	int locateRing(const Ring &r) const {
+		for (const Point &p : r) {
+			const int loc = locate(p);
+			if (loc != 0) return loc;
+		}
+		return 0;
+	}
+
+private:
+	const Ring &ring;
+	double minY = 0, scale = 0, pad = 0;
+	std::size_t bands = 1;
+	std::vector<std::size_t> start;
+	std::vector<uint32_t> edges;
+
+	std::size_t bandOf(double y) const {
+		const double b = (y - minY) * scale;
+		return b <= 0 ? std::size_t(0) : std::min(bands - 1, static_cast<std::size_t>(b));
+	}
+	// Edge i joins ring[i] and ring[i - 1] (ring[n - 1] for i = 0), as in pointInRing
+	template <class F> void forEachEdge(F f) const {
+		const std::size_t n = ring.size();
+		for (std::size_t i = 0; i < n; i++) {
+			const Point &a = ring[i], &c = ring[i == 0 ? n - 1 : i - 1];
+			f(i, std::min(a.y(), c.y()), std::max(a.y(), c.y()));
+		}
+	}
+};
+
 bool clipPolygon(const RectClipper &rc, const Polygon &poly, MultiPolygon &out) {
 	std::vector<RectChain> chains;
 	const RingClip outerClip = clipRing(rc, poly.outer(), chains);
@@ -1446,11 +1537,22 @@ bool clipPolygon(const RectClipper &rc, const Polygon &poly, MultiPolygon &out) 
 		}
 	}
 
-	// Holes wholly inside the box go to whichever new outer contains them
+	// Holes wholly inside the box go to whichever new outer contains them. With
+	// many holes and a large outer, index each outer for the point-in-ring tests.
+	std::vector<std::unique_ptr<RingLocator>> locators(out.size() - firstOuter);
+	const bool index = insideHoles.size() >= 16;
 	for (const Ring *hole : insideHoles) {
 		bool placed = false;
 		for (std::size_t i = firstOuter; i < out.size() && !placed; i++) {
-			const int r = ringInRing(*hole, out[i].outer());
+			const Ring &outer = out[i].outer();
+			int r;
+			if (index && outer.size() >= 256) {
+				auto &loc = locators[i - firstOuter];
+				if (!loc) loc.reset(new RingLocator(outer));
+				r = loc->locateRing(*hole);
+			} else {
+				r = ringInRing(*hole, outer);
+			}
 			if (r == 0) return false;
 			if (r > 0) {
 				out[i].inners().push_back(*hole);
