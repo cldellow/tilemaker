@@ -538,7 +538,16 @@ int main(const int argc, const char* argv[]) {
 		tileError = "z" + std::to_string(zoom) + "/" + std::to_string(coords.x) + "/" + std::to_string(coords.y) + ": " + what;
 		tileFailed = true;
 	};
-	const uint cutZoom = std::max<uint>(12, config.startZoom);
+	// Batches are a fixed partition: each tile at batchZoom or below is its own
+	// batch, along with its whole subtree for a tile at batchZoom. Tiles come
+	// depth-first from z6 (sortTileCoordinates), so every tile below batchZoom
+	// shares a batch with all its ancestors down to batchZoom, and the
+	// batch-local ClipCache lets it clip theirs rather than the whole geometry.
+	// (With z12 subtrees, z<=12 tiles all clipped whole geometries: Lake Huron's
+	// 477k points for each of its 3,186 z12 tiles.) A subtree is at most 5
+	// zooms deep: 1 + 4 + ... + 4^5 = 1,365 tiles. The partition doesn't depend
+	// on thread count, so neither does the output.
+	const uint batchZoom = std::max<uint>(config.startZoom, std::max<uint>(9, config.endZoom > 5 ? config.endZoom - 5 : 0));
 	// Batches are handed out as threads become free rather than all posted up
 	// front: a planet has ~14M of them, and their queued handlers held GBs.
 	std::mutex batchMutex;
@@ -548,27 +557,11 @@ int main(const int argc, const char* argv[]) {
 		const std::lock_guard<std::mutex> lock(batchMutex);
 		startIndex = nextBatchStart;
 		seq = nextBatchSeq++;
-		// Compute how many tiles should be assigned to this batch --
-		// higher-zoom tiles are cheaper to compute, lower-zoom tiles more expensive.
 		batchSize = 0;
-		size_t weight = 0;
-		// Batches are a fixed partition: each z<=11 tile is its own batch, and
-		// z12 subtrees are grouped (~2 per batch), so z13/z14 tiles usually share
-		// a batch with their z12 ancestor (batch-local ClipCache can reuse its clips).
-		// The partition doesn't depend on thread count, so neither does the output.
 		while (startIndex + batchSize < tileCoordinates.size()) {
 			const auto& zoom = tileCoordinates[startIndex + batchSize].first;
-			if (batchSize > 0 && (weight >= 1000 || (weight >= 50 && zoom <= cutZoom)))
+			if (batchSize > 0 && zoom <= batchZoom)
 				break;
-			if (zoom > 12)
-				weight++;
-			else if (zoom > 11)
-				weight += 10;
-			else if (zoom > 10)
-				weight += 100;
-			else
-				weight += 1000;
-
 			batchSize++;
 		}
 		nextBatchStart += batchSize;
