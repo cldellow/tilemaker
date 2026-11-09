@@ -170,6 +170,7 @@ namespace {
 const double kPrecheckEps = 1e-9;
 const std::size_t kPrecheckMaxWork = 1 << 26; // ring vertices walked by point-in-ring tests
 const std::size_t kPrecheckRetained = 1 << 16;
+const std::size_t kPrecheckMaxTouches = 1 << 16; // segment pairs meeting at shared vertices
 
 struct PrecheckSeg {
 	double minX, maxX, minY, maxY;
@@ -180,11 +181,20 @@ struct PrecheckBox {
 	double minX, maxX, minY, maxY;
 	uint32_t id; // ring or polygon number
 };
+// Two segments of different rings that meet at exactly one shared vertex `p`
+// (allowed only if validTouches() accepts it: see there).
+struct PrecheckTouch {
+	Point p;
+	PrecheckSeg s, t;
+};
+
 struct PrecheckScratch {
 	std::vector<PrecheckSeg> segs;
 	std::vector<PrecheckBox> boxes;
 	std::vector<std::pair<uint32_t, uint32_t>> pairs;
 	std::vector<uint32_t> bandStart, bandFill, bandSegs, crossed;
+	std::vector<PrecheckTouch> touches;
+	std::vector<uint32_t> ringSet;
 	void trim() {
 		if (segs.capacity() > kPrecheckRetained) std::vector<PrecheckSeg>().swap(segs);
 		if (boxes.capacity() > kPrecheckRetained) std::vector<PrecheckBox>().swap(boxes);
@@ -193,6 +203,8 @@ struct PrecheckScratch {
 		if (bandFill.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(bandFill);
 		if (bandSegs.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(bandSegs);
 		if (crossed.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(crossed);
+		if (touches.capacity() > kPrecheckRetained) std::vector<PrecheckTouch>().swap(touches);
+		if (ringSet.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(ringSet);
 	}
 };
 thread_local PrecheckScratch precheckScratch;
@@ -320,21 +332,129 @@ inline bool segsClear(const PrecheckSeg &s, const PrecheckSeg &t, double tol) {
 	return o3 != 0 && o3 == o4; // p entirely on one side of line q; else crossing, touching or unsure
 }
 
+// The one vertex shared exactly by segments of two different rings, if they
+// share exactly one (and so are a candidate touch rather than a crossing).
+inline bool sharedVertex(const PrecheckSeg &s, const PrecheckSeg &t, Point &p) {
+	if (s.ring == t.ring) return false;
+	int shared = 0;
+	for (int i = 0; i < 2; i++)
+		for (int j = 0; j < 2; j++)
+			if (s.a[i].x() == t.a[j].x() && s.a[i].y() == t.a[j].y()) { p = s.a[i]; shared++; }
+	return shared == 1;
+}
+
 // All pairs of segments clearly disjoint: sweep over segments sorted by minX.
 // The answer does not depend on the order (every x-overlapping pair is tested).
-bool segmentsClear(std::vector<PrecheckSeg> &segs, double tol) {
+// With `touches`, a pair of different rings' segments that share exactly one
+// vertex is recorded there instead of failing; the caller must check them
+// (validTouches).
+bool segmentsClear(std::vector<PrecheckSeg> &segs, double tol, std::vector<PrecheckTouch> *touches = nullptr) {
 	const std::size_t n = segs.size();
+	if (touches) touches->clear();
+	auto clear = [&](const PrecheckSeg &a, const PrecheckSeg &b) {
+		if (segsClear(a, b, tol)) return true;
+		Point p;
+		if (!touches || !sharedVertex(a, b, p) || touches->size() >= kPrecheckMaxTouches) return false;
+		touches->push_back({ p, a, b });
+		return true;
+	};
 	if (n <= 32) {
 		for (std::size_t i = 0; i < n; i++)
 			for (std::size_t j = i + 1; j < n; j++)
-				if (!segsClear(segs[i], segs[j], tol)) return false;
+				if (!clear(segs[i], segs[j])) return false;
 		return true;
 	}
 	std::sort(segs.begin(), segs.end(), [](const PrecheckSeg &a, const PrecheckSeg &b) { return a.minX < b.minX; });
 	for (std::size_t i = 0; i < n; i++) {
 		const double limit = segs[i].maxX + tol;
 		for (std::size_t j = i + 1; j < n && segs[j].minX <= limit; j++)
-			if (!segsClear(segs[i], segs[j], tol)) return false;
+			if (!clear(segs[i], segs[j])) return false;
+	}
+	return true;
+}
+
+// The far end (from p) of a segment that has p as an endpoint.
+inline const Point &farEnd(const PrecheckSeg &s, const Point &p) {
+	return (s.a[0].x() == p.x() && s.a[0].y() == p.y()) ? s.a[1] : s.a[0];
+}
+
+// Rings that touch at single vertices, as OGC and Boost allow, provided that
+// 1. at each touch vertex exactly two rings meet, each with exactly its two
+//    segments there, and the second ring's two segments lie clearly inside one
+//    of the two angles the first ring's segments make: segments leaving a point
+//    in different directions meet only there, so the rings touch without
+//    crossing (or overlapping) at it;
+// 2. the rings and touches form no cycle (each touch joins two rings not yet
+//    joined), so the interior stays connected. A cycle (including two touches
+//    of the same two rings) can cut a piece off the interior, which Boost calls
+//    invalid (failure_disconnected_interior); it answers "unsure" here.
+// Anything borderline answers false ("unsure"), as elsewhere in the precheck.
+// `ringPolygon` gives each ring's polygon; touches between polygons answer false.
+bool validTouches(std::vector<PrecheckTouch> &touches, std::size_t rings, std::vector<uint32_t> &ringSet,
+                  double tol, const std::vector<uint32_t> *ringPolygon = nullptr) {
+	if (touches.empty()) return true;
+	std::sort(touches.begin(), touches.end(), [](const PrecheckTouch &a, const PrecheckTouch &b) {
+		return a.p.x() < b.p.x() || (a.p.x() == b.p.x() && a.p.y() < b.p.y());
+	});
+	ringSet.resize(rings);
+	for (std::size_t r = 0; r < rings; r++) ringSet[r] = static_cast<uint32_t>(r);
+	auto find = [&](uint32_t r) {
+		while (ringSet[r] != r) { ringSet[r] = ringSet[ringSet[r]]; r = ringSet[r]; }
+		return r;
+	};
+
+	for (std::size_t i = 0; i < touches.size(); ) {
+		const Point p = touches[i].p;
+		std::size_t j = i;
+		while (j < touches.size() && touches[j].p.x() == p.x() && touches[j].p.y() == p.y()) j++;
+
+		// The segments of each ring at p (distinct segments, by their start)
+		uint32_t ringA = touches[i].s.ring, ringB = touches[i].t.ring;
+		const Point *segA[2] = { nullptr, nullptr }, *segB[2] = { nullptr, nullptr };
+		const PrecheckSeg *segAs[2] = { nullptr, nullptr }, *segBs[2] = { nullptr, nullptr };
+		auto add = [&](const PrecheckSeg &s) {
+			const bool isA = s.ring == ringA;
+			if (!isA && s.ring != ringB) return false; // a third ring at p
+			const Point **seg = isA ? segA : segB;
+			const PrecheckSeg **segs = isA ? segAs : segBs;
+			for (int k = 0; k < 2; k++) {
+				if (seg[k] == s.a) return true;
+				if (!seg[k]) { seg[k] = s.a; segs[k] = &s; return true; }
+			}
+			return false; // a third segment of the ring at p
+		};
+		for (std::size_t k = i; k < j; k++)
+			if (!add(touches[k].s) || !add(touches[k].t)) return false;
+		if (!segA[1] || !segB[1]) return false;
+		if (ringPolygon && (*ringPolygon)[ringA] != (*ringPolygon)[ringB]) return false;
+
+		// 1. B's segments clearly inside one angle of A's
+		const Point &a1 = farEnd(*segAs[0], p), &a2 = farEnd(*segAs[1], p);
+		const int turn = clearOrient(p, a1, a2, tol);
+		if (turn == 0) return false; // A straight (or folded) at p: too close to call
+		// 1 = x's direction from p is inside the angle a1-p-a2 under 180 degrees,
+		// -1 = inside the other one, 0 = unsure (along a1 or a2).
+		auto opposite = [&](const Point &a, const Point &x) {
+			// x is (nearly) on the line p-a: on the other side of p from a? With the
+			// cross product near zero, the dot product is far from zero.
+			return (a.x() - p.x()) * (x.x() - p.x()) + (a.y() - p.y()) * (x.y() - p.y()) < 0;
+		};
+		auto inConvexAngle = [&](const Point &x) {
+			const int s1 = clearOrient(p, a1, x, tol), s2 = clearOrient(p, a2, x, tol);
+			// Pointing away from a1 or a2 is outside the angle under 180 degrees
+			// (whose other side is not along that line, as turn != 0).
+			if (s1 == 0) return opposite(a1, x) ? -1 : 0;
+			if (s2 == 0) return opposite(a2, x) ? -1 : 0;
+			return (s1 == turn && s2 == -turn) ? 1 : -1;
+		};
+		const int b1 = inConvexAngle(farEnd(*segBs[0], p)), b2 = inConvexAngle(farEnd(*segBs[1], p));
+		if (b1 == 0 || b1 != b2) return false;
+
+		// 2. No cycle
+		const uint32_t ra = find(ringA), rb = find(ringB);
+		if (ra == rb) return false;
+		ringSet[ra] = rb;
+		i = j;
 	}
 	return true;
 }
@@ -345,6 +465,9 @@ bool segmentsClear(std::vector<PrecheckSeg> &segs, double tol) {
 // crossing parity is exact; only the side of h is decided with a tolerance.
 inline int rayClearlyCrosses(const Point &h, const Point &a, const Point &b, double tol) {
 	const double hx = h.x(), hy = h.y();
+	// h on the segment's ring, at a vertex where two rings touch (validTouches):
+	// the crossing parity says nothing about which side h is on
+	if ((a.x() == hx && a.y() == hy) || (b.x() == hx && b.y() == hy)) return 0;
 	if ((a.y() > hy) == (b.y() > hy)) return -1;
 	if (std::max(a.x(), b.x()) < hx) return -1;
 	if (std::min(a.x(), b.x()) > hx) return 1;
@@ -376,7 +499,8 @@ int ringClearlyInRing(const Ring &inner, const Ring &r, double tol) {
 }
 
 // Holes lie inside the outer ring (ring 0) and outside each other. `segs` holds the
-// segments of all rings of p, known not to touch. They are bucketed into horizontal
+// segments of all rings of p, known not to cross (they touch at most at single shared
+// vertices, without crossing: validTouches). They are bucketed into horizontal
 // bands, so that a ray from a vertex of each hole is tested against the segments of
 // that vertex's band only, counting crossings per ring (odd = inside that ring).
 bool holesClearlyPlaced(const Polygon &p, PrecheckScratch &scratch, double tol) {
@@ -443,7 +567,8 @@ bool holesClearlyPlaced(const Polygon &p, PrecheckScratch &scratch, double tol) 
 		return inOuter ? 1 : -1;
 	};
 
-	// A ring known not to touch the others lies wherever any of its vertices does
+	// A ring known not to cross the others lies wherever any of its vertices does
+	// (a vertex where it touches another ring answers "unsure", and the next is tried)
 	for (std::size_t i = 0; i < inners.size(); i++) {
 		const Ring &hole = inners[i];
 		const std::size_t m = hole.size() - 1;
@@ -473,8 +598,10 @@ bool polygonClear(const Polygon &p, PrecheckScratch &scratch, PrecheckBox &outer
 	for (std::size_t i = 0; i < inners.size(); i++)
 		if (!ringClear(inners[i], true, tol, static_cast<uint32_t>(i + 1), segs, holeBox)) return false;
 
-	// No two rings touch, and no ring touches itself.
-	if (!segmentsClear(segs, tol)) return false;
+	// No ring touches itself, and two rings touch only at single shared vertices
+	// that keep the interior connected.
+	if (!segmentsClear(segs, tol, &scratch.touches)) return false;
+	if (!validTouches(scratch.touches, inners.size() + 1, scratch.ringSet, tol)) return false;
 
 	// Holes lie inside the outer ring and are not nested in each other.
 	return holesClearlyPlaced(p, scratch, tol);
