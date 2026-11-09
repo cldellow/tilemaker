@@ -154,6 +154,14 @@ MU_TEST(test_precheck_touching_rings) {
 	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(2 2,2 4,4 4,4 2,2 2),(4 2,4 4,6 4,6 2,4 2)))"), false);
 	// A hole that touches another and lies inside it: nested, invalid
 	checkPrecheck(fromWkt("MULTIPOLYGON(((0 0,0 10,10 10,10 0,0 0),(1 1,1 9,9 9,9 1,1 1),(1 1,3 4,4 3,1 1)))"), false);
+	// The same at a corner where the ray from the touch vertex passes no edge of
+	// the outer hole: the touch vertex, tested first, mustn't place the hole
+	for (const char *wkt : { "POLYGON((0 0,0 10,10 10,10 0,0 0),(1 1,9 1,9 9,1 9,1 1),(1 9,3 6,4 8,1 9))",
+	                         "POLYGON((0 0,0 10,10 10,10 0,0 0),(1 1,9 1,9 9,1 9,1 1),(1 9,4 8,3 6,1 9))" }) {
+		Polygon p; geom::read_wkt(wkt, p);
+		MultiPolygon mp; mp.push_back(p); geom::correct(mp);
+		checkPrecheck(mp, false);
+	}
 }
 
 static Ring squareRing(double x, double y, double size) {
