@@ -12,6 +12,7 @@
 #include <memory>
 #include <map>
 #include "osm_store.h"
+#include "geom.h"
 #include "significant_tags.h"
 #include "pbf_reader.h"
 #include "tag_map.h"
@@ -53,6 +54,13 @@ public:
 
 	PbfProcessor(OSMStore &osmStore);
 
+	// Ways and relations whose bounds miss BOX (lon, latp) aren't processed:
+	// no Lua, no geometry. Ways that relations use are still stored, so the
+	// relations that reach the box can be assembled.
+	void setSkipBox(const Box& box);
+	uint64_t skippedWays() const { return skippedWays_.load(); }
+	uint64_t skippedRelations() const { return skippedRelations_.load(); }
+
 	using pbfreader_generate_output = std::function< std::shared_ptr<OsmLuaProcessing> () >;
 	using pbfreader_generate_stream = std::function< std::shared_ptr<std::istream> () >;
 
@@ -79,6 +87,14 @@ public:
 	}
 
 private:
+	bool hasSkipBox = false;
+	int32_t skipMinLon = 0, skipMinLatp = 0, skipMaxLon = 0, skipMaxLatp = 0; // as LatpLon: degrees * 1e7
+	std::atomic<uint64_t> skippedWays_{0}, skippedRelations_{0};
+	// Whether a bounds (as LatpLon) misses the skip box.
+	bool missesSkipBox(int32_t minLatp, int32_t minLon, int32_t maxLatp, int32_t maxLon) const {
+		return maxLon < skipMinLon || minLon > skipMaxLon || maxLatp < skipMinLatp || minLatp > skipMaxLatp;
+	}
+
 	bool ReadBlock(
 		std::istream &infile,
 		OsmLuaProcessing &output,

@@ -6,7 +6,10 @@
 #include <boost/asio/post.hpp>
 #include <exception>
 #include <unordered_set>
+#include <algorithm>
 #include <chrono>
+#include <climits>
+#include <cmath>
 #include <sstream>
 
 #include "node_store.h"
@@ -85,6 +88,14 @@ bool PbfProcessor::ReadNodes(OsmLuaProcessing& output, PbfReader::PrimitiveGroup
 	}
 
 	return !pg.nodes().empty();
+}
+
+void PbfProcessor::setSkipBox(const Box& box) {
+	hasSkipBox = true;
+	skipMinLon = std::floor(box.min_corner().x() * 10000000.0);
+	skipMaxLon = std::ceil(box.max_corner().x() * 10000000.0);
+	skipMinLatp = std::floor(box.min_corner().y() * 10000000.0);
+	skipMaxLatp = std::ceil(box.max_corner().y() * 10000000.0);
 }
 
 bool PbfProcessor::ReadWays(
@@ -176,8 +187,20 @@ bool PbfProcessor::ReadWays(
 		}
 		if (llVec.empty()) continue;
 
+		// Outside the skip box: not processed, but still stored if a relation uses it.
+		bool outside = false;
+		if (hasSkipBox) {
+			int32_t minLatp = llVec[0].latp, maxLatp = minLatp, minLon = llVec[0].lon, maxLon = minLon;
+			for (const LatpLon& ll : llVec) {
+				minLatp = std::min(minLatp, ll.latp); maxLatp = std::max(maxLatp, ll.latp);
+				minLon = std::min(minLon, ll.lon); maxLon = std::max(maxLon, ll.lon);
+			}
+			outside = missesSkipBox(minLatp, minLon, maxLatp, maxLon);
+			if (outside) skippedWays_++;
+		}
+
 		try {
-			bool emitted = output.canWriteWays() && output.setWay(static_cast<WayID>(pbfWay.id), llVec, tags);
+			bool emitted = !outside && output.canWriteWays() && output.setWay(static_cast<WayID>(pbfWay.id), llVec, tags);
 
 			// If we need it for later, store the way's coordinates in the global way store
 			if (emitted || osmStore.way_is_used(wayId)) {
@@ -377,6 +400,33 @@ bool PbfProcessor::ReadRelations(
 					}
 				} else {
 					readTags(pbfRelation, pb, tags);
+				}
+
+				// Outside the skip box (by its member ways' bounds; one with none in the
+				// store is kept): not processed.
+				if (hasSkipBox && (osmStore.usedRelations.test(pbfRelation.id) || wayKeys.filter(tags))) {
+					bool any = false;
+					int32_t minLatp = INT32_MAX, maxLatp = INT32_MIN, minLon = INT32_MAX, maxLon = INT32_MIN;
+					std::vector<LatpLon> coords;
+					for (const WayVec* ways : {&outerWayVec, &innerWayVec}) {
+						for (WayID wayId : *ways) {
+							try {
+								coords.clear();
+								osmStore.ways.at(wayId, coords);
+							} catch (std::out_of_range &) {
+								continue;
+							}
+							for (const LatpLon& ll : coords) {
+								any = true;
+								minLatp = std::min(minLatp, ll.latp); maxLatp = std::max(maxLatp, ll.latp);
+								minLon = std::min(minLon, ll.lon); maxLon = std::max(maxLon, ll.lon);
+							}
+						}
+					}
+					if (any && missesSkipBox(minLatp, minLon, maxLatp, maxLon)) {
+						skippedRelations_++;
+						continue;
+					}
 				}
 
 				if (osmStore.usedRelations.test(pbfRelation.id) || wayKeys.filter(tags)) {

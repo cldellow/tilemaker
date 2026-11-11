@@ -22,6 +22,8 @@ po::options_description getParser(OptionsParser::Options& options) {
 		("input",  po::value< vector<string> >(&options.inputFiles),                     "source .osm.pbf file")
 		("output", po::value< string >(&options.outputFile),                             "target directory or .mbtiles/.pmtiles file")
 		("bbox",   po::value< string >(&options.bbox),                                   "bounding box to use if input file does not have a bbox header set, example: minlon,minlat,maxlon,maxlat")
+		("skip-outside-bbox", po::value<int>(&options.skipOutsideBboxZoom)->default_value(-1)->value_name("ZOOM"),
+		                                                                                 "with a bounding box, don't process OSM ways and relations that can't reach it (grown to whole tiles at ZOOM): tiles from ZOOM up are unchanged, lower zooms lose features outside it")
 		("merge"  ,po::bool_switch(&options.mergeSqlite),                                "merge with existing .mbtiles (overwrites otherwise)")
 		("config", po::value< string >(&options.jsonFile)->default_value("config.json"), "config JSON file")
 		("process",po::value< string >(&options.luaFile)->default_value("process.lua"),  "tag-processing Lua file")
