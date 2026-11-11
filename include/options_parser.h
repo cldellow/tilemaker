@@ -39,6 +39,9 @@ namespace OptionsParser {
 		uint32_t threadNum = 0;
 		std::string outputFile;
 		std::string bbox;
+		// With a bbox: skip ways and relations whose bounds miss it, grown
+		// to whole tiles at this zoom (-1: off). See PbfProcessor::setSkipBox.
+		int skipOutsideBboxZoom = -1;
 
 		OsmOptions osm;
 		bool showHelp = false;

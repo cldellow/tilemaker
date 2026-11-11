@@ -345,6 +345,22 @@ int main(const int argc, const char* argv[]) {
 	// ----	Read all PBFs
 	
 	PbfProcessor pbfProcessor(osmStore);
+	if (options.skipOutsideBboxZoom >= 0) {
+		if (bboxElements.empty()) {
+			cerr << "--skip-outside-bbox needs --bbox" << endl;
+			return -1;
+		}
+		// The box grown to the tiles at that zoom that it touches: tiles from
+		// that zoom up see every feature they would otherwise.
+		const uint8_t z = std::min(options.skipOutsideBboxZoom, 14);
+		const uint32_t x0 = lon2tilex(clippingBox.min_corner().x(), z), x1 = lon2tilex(clippingBox.max_corner().x(), z);
+		const uint32_t y0 = latp2tiley(clippingBox.max_corner().y(), z), y1 = latp2tiley(clippingBox.min_corner().y(), z);
+		Box skipBox(geom::make<Point>(tilex2lon(x0, z), tiley2latp(y1 + 1, z)),
+		            geom::make<Point>(tilex2lon(x1 + 1, z), tiley2latp(y0, z)));
+		pbfProcessor.setSkipBox(skipBox);
+		cout << "Skipping OSM ways and relations outside " << skipBox.min_corner().x() << ", " << latp2lat(skipBox.min_corner().y()) << ", "
+		     << skipBox.max_corner().x() << ", " << latp2lat(skipBox.max_corner().y()) << " (the bounding box's z" << int(z) << " tiles)" << endl;
+	}
 	std::vector<bool> sortOrders = layers.getSortOrders();
 
 	for (auto inputFile : options.inputFiles) {
@@ -384,6 +400,8 @@ int main(const int argc, const char* argv[]) {
 		}
 		if (ret != 0) return ret;
 	} 
+	if (options.skipOutsideBboxZoom >= 0)
+		cout << "Skipped " << pbfProcessor.skippedWays() << " ways and " << pbfProcessor.skippedRelations() << " relations outside the box" << endl;
 	attributeStore.finalize();
 	osmMemTiles.reportSize();
 	attributeStore.reportSize();
