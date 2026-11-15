@@ -1,3 +1,4 @@
+#include <memory>
 /*! \file */ 
 
 // C++ includes
@@ -29,6 +30,9 @@
 #include "rapidjson/filereadstream.h"
 #include "rapidjson/filewritestream.h"
 #include "rapidjson/error/en.h"
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>	// sysconf
+#endif
 
 #ifndef _MSC_VER
 #include <sys/resource.h>
@@ -83,8 +87,48 @@ bool verbose = false;
 void sortTileCoordinates(
     const size_t baseZoom,
     const size_t threadNum,
-    std::deque<std::pair<unsigned int, TileCoordinates>>& tileCoordinates
+    std::vector<std::pair<unsigned int, TileCoordinates>>& tileCoordinates
 );
+void sortTileKeys(uint64_t *keys, size_t count, size_t threadNum);
+
+
+// The order of sortTileCoordinates as a 64-bit key, so that the tile list can be sorted as plain
+// numbers. z0..5 first, breadth-first: (zoom, x, y). Then depth-first from z6: the comparator
+// compares the z6 x and y, then at each further zoom the x and y of the tiles' ancestors - with
+// equal ancestors those differ only in the new bit, so each zoom adds the digit (x bit, y bit). A
+// tile whose ancestors all equal the other's comes first (smaller zoom): its missing digits are
+// 0, and the zoom is the last field. Needs 2 * (maxZoom - 6) + 12 + 5 + 1 bits.
+static inline uint64_t tileOrderKey(unsigned zoom, TileCoordinate x, TileCoordinate y, unsigned maxZoom) {
+	if (zoom < CLUSTER_ZOOM)
+		return (uint64_t(zoom) << 40) | (uint64_t(x) << 20) | uint64_t(y);
+	const unsigned levels = maxZoom - CLUSTER_ZOOM;	// digits after z6
+	uint64_t key = (uint64_t(x >> (zoom - CLUSTER_ZOOM)) << 6) | uint64_t(y >> (zoom - CLUSTER_ZOOM));
+	for (unsigned z = CLUSTER_ZOOM + 1; z <= maxZoom; z++) {
+		unsigned digit = 0;
+		if (z <= zoom) digit = (((x >> (zoom - z)) & 1) << 1) | ((y >> (zoom - z)) & 1);
+		key = (key << 2) | digit;
+	}
+	(void)levels;
+	return (uint64_t(1) << 63) | (key << 5) | zoom;
+}
+
+static inline std::pair<unsigned int, TileCoordinates> tileFromOrderKey(uint64_t key, unsigned maxZoom) {
+	if (!(key >> 63)) {
+		const unsigned zoom = (key >> 40) & 0xff;
+		return { zoom, TileCoordinates((key >> 20) & 0xfffff, key & 0xfffff) };
+	}
+	const unsigned zoom = key & 31;
+	uint64_t digits = (key >> 5) & ~(uint64_t(1) << 58);
+	TileCoordinate x = 0, y = 0;
+	for (unsigned z = maxZoom; z > CLUSTER_ZOOM; z--) {
+		const unsigned digit = digits & 3;
+		digits >>= 2;
+		if (z <= zoom) { x |= TileCoordinate(digit >> 1) << (zoom - z); y |= TileCoordinate(digit & 1) << (zoom - z); }
+	}
+	x |= TileCoordinate((digits >> 6) & 63) << (zoom - CLUSTER_ZOOM);
+	y |= TileCoordinate(digits & 63) << (zoom - CLUSTER_ZOOM);
+	return { zoom, TileCoordinates(x, y) };
+}
 
 /**
  *\brief The Main function is responsible for command line processing, loading data and starting worker threads.
@@ -93,6 +137,23 @@ void sortTileCoordinates(
  *
  * Worker threads write the output tiles, and start in the outputProc function.
  */
+// Memory this process may use: physical RAM, or the cgroup (v2/v1) limit if lower; 0 if unknown
+static uint64_t availableMemoryBytes() {
+	uint64_t bytes = 0;
+#if defined(__unix__) || defined(__APPLE__)
+	const long pages = sysconf(_SC_PHYS_PAGES), pageSize = sysconf(_SC_PAGESIZE);
+	if (pages > 0 && pageSize > 0) bytes = (uint64_t)pages * (uint64_t)pageSize;
+#endif
+#ifdef __linux__
+	for (const char *path : { "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes" }) {
+		std::ifstream f(path);
+		unsigned long long limit = 0;
+		if (f >> limit && limit > 0 && (bytes == 0 || limit < bytes)) bytes = limit;
+	}
+#endif
+	return bytes;
+}
+
 int main(const int argc, const char* argv[]) {
 #ifdef __GLIBC__
 	// glibc raises its mmap threshold dynamically (up to 32/64 MB) once a large
@@ -296,9 +357,23 @@ int main(const int argc, const char* argv[]) {
 	OsmLuaProcessing osmLuaProcessing(osmStore, config, layers, options.luaFile, 
 		shpMemTiles, osmMemTiles, attributeStore, declutter, options.osm.materializeGeometries, true);
 
+	// ----	Read significant node/way tags (before the external sources: they use this Lua state)
+	const SignificantTags significantNodeTags = osmLuaProcessing.GetSignificantNodeKeys();
+	const SignificantTags significantWayTags = osmLuaProcessing.GetSignificantWayKeys();
+
 	// ---- Load external sources (shp/geojson)
 
-	{
+	bool anyIndexed = false, anyExternal = false;
+	for (auto const &layer : layers.layers) {
+		if (layer.indexed) anyIndexed = true;
+		if (layer.source.size() > 0) anyExternal = true;
+	}
+	if (anyExternal && !hasClippingBox) {
+		cerr << "Can't read shapefiles unless a bounding box is provided." << endl;
+		exit(EXIT_FAILURE);
+	}
+	int externalResult = 0;
+	auto readExternal = [&]() {
 		ShpProcessor shpProcessor(clippingBox, options.threadNum, shpMemTiles, osmLuaProcessing);
 		GeoJSONProcessor geoJSONProcessor(clippingBox, options.threadNum, shpMemTiles, osmLuaProcessing);
 		for (size_t layerNum=0; layerNum<layers.layers.size(); layerNum++) {
@@ -306,34 +381,38 @@ int main(const int argc, const char* argv[]) {
 			if(layer.indexed) { shpMemTiles.CreateNamedLayerIndex(layer.name); }
 
 			if (layer.source.size()>0) {
-				if (!hasClippingBox) {
-					cerr << "Can't read shapefiles unless a bounding box is provided." << endl;
-					exit(EXIT_FAILURE);
-				} else {
-					try {
-						if (ends_with(layer.source, "json") || ends_with(layer.source, "jsonl") || ends_with(layer.source, "JSON") || ends_with(layer.source, "JSONL") || ends_with(layer.source, "jsonseq") || ends_with(layer.source, "JSONSEQ")) {
-							cout << "Reading GeoJSON " << layer.name << endl;
-							geoJSONProcessor.read(layers.layers[layerNum], layerNum);
-						} else {
-							cout << "Reading shapefile " << layer.name << endl;
-							shpProcessor.read(layers.layers[layerNum], layerNum);
-						}
-					} catch (const std::exception& e) {
-						cerr << "Error reading external source " << layer.source << ": " << e.what() << endl;
-						return -1;
-					} catch (...) {
-						cerr << "Unknown error reading external source " << layer.source << endl;
-						return -1;
+				try {
+					if (ends_with(layer.source, "json") || ends_with(layer.source, "jsonl") || ends_with(layer.source, "JSON") || ends_with(layer.source, "JSONL") || ends_with(layer.source, "jsonseq") || ends_with(layer.source, "JSONSEQ")) {
+						cout << "Reading GeoJSON " << layer.name << endl;
+						geoJSONProcessor.read(layers.layers[layerNum], layerNum);
+					} else {
+						cout << "Reading shapefile " << layer.name << endl;
+						shpProcessor.read(layers.layers[layerNum], layerNum);
 					}
+				} catch (const std::exception& e) {
+					cerr << "Error reading external source " << layer.source << ": " << e.what() << endl;
+					externalResult = -1;
+					return;
+				} catch (...) {
+					cerr << "Unknown error reading external source " << layer.source << endl;
+					externalResult = -1;
+					return;
 				}
 			}
 		}
+	};
+	// Unless a layer is indexed (the .pbf's Lua code may look things up in it), nothing read from
+	// the .pbf depends on the external sources, so read them alongside the .pbf: the ocean shapefile
+	// alone took ~11 s, mostly on a few threads, at the start of a planet run.
+	std::thread externalThread;
+	struct JoinOnExit { std::thread &t; ~JoinOnExit() { if (t.joinable()) t.join(); } } joinExternal { externalThread };
+	if (anyIndexed || !anyExternal) {
+		readExternal();
+		if (externalResult != 0) return externalResult;
+		shpMemTiles.reportSize();
+	} else {
+		externalThread = std::thread(readExternal);
 	}
-	shpMemTiles.reportSize();
-
-	// ----	Read significant node/way tags
-	const SignificantTags significantNodeTags = osmLuaProcessing.GetSignificantNodeKeys();
-	const SignificantTags significantWayTags = osmLuaProcessing.GetSignificantWayKeys();
 
 	// ----	Read all PBFs
 	
@@ -371,6 +450,11 @@ int main(const int argc, const char* argv[]) {
 		);
 		if (ret != 0) return ret;
 	} 
+	if (externalThread.joinable()) {
+		externalThread.join();
+		if (externalResult != 0) return externalResult;
+		shpMemTiles.reportSize();
+	}
 	attributeStore.finalize();
 	osmMemTiles.reportSize();
 	attributeStore.reportSize();
@@ -439,7 +523,10 @@ int main(const int argc, const char* argv[]) {
 		sharedData.pmtiles.isSparse = false;
 	}
 
-	std::deque<std::pair<unsigned int, TileCoordinates>> tileCoordinates;
+	std::vector<std::pair<unsigned int, TileCoordinates>> tileCoordinates;
+	// z(SHARED_PIECE_ZOOM) tiles below which a tile is written (for the shared pieces)
+	const unsigned pieceZoom = TileDataSource::SHARED_PIECE_ZOOM;
+	std::vector<uint8_t> piecePresent((size_t)1 << (2 * pieceZoom), 0);
 	std::vector<std::shared_ptr<TileCoordinatesSet>> zoomResults;
 	zoomResults.reserve(sharedData.config.endZoom + 1);
 
@@ -454,6 +541,7 @@ int main(const int argc, const char* argv[]) {
 		clock_gettime(CLOCK_MONOTONIC, &start);
 #endif
 		std::cout << "collecting tiles" << std::flush;
+		if (options.threadNum > 1 && sharedData.config.endZoom >= 12) z12ObjectCounts.assign((size_t)1 << 24, 0);
 		populateTilesAtZoom(sources, zoomResults, options.threadNum);
 #ifdef CLOCK_MONOTONIC
 		clock_gettime(CLOCK_MONOTONIC, &end);
@@ -468,6 +556,9 @@ int main(const int argc, const char* argv[]) {
 	}
 
 	std::cout << ", filtering tiles:" << std::flush;
+	// Parts of the tile list, in order (zoom by zoom, stripe by stripe): copied into one allocation
+	// at the end, on all threads
+	std::vector<std::vector<std::pair<unsigned int, TileCoordinates>>> listParts;
 	for (uint zoom=sharedData.config.startZoom; zoom <= sharedData.config.endZoom; zoom++) {
 		std::cout << " z" << std::to_string(zoom) << std::flush;
 #ifdef CLOCK_MONOTONIC
@@ -476,8 +567,7 @@ int main(const int argc, const char* argv[]) {
 #endif
 
 		const auto& zoomResult = zoomResults[zoom];
-		int numTiles = 0;
-		zoomResult->forEachSet([&](TileCoordinate x, TileCoordinate y) {
+		auto keep = [&](TileCoordinate x, TileCoordinate y) {
 			if (hasClippingBox) {
 				bool isInAWhollyCoveredZ6Tile = false;
 				if (zoom >= 6) {
@@ -487,12 +577,56 @@ int main(const int argc, const char* argv[]) {
 				}
 
 				if(!isInAWhollyCoveredZ6Tile && !boost::geometry::intersects(TileBbox(TileCoordinates(x, y), zoom, false, false).getTileBox(), clippingBox)) 
-					return;
+					return false;
 			}
-
-			tileCoordinates.push_back(std::make_pair(zoom, TileCoordinates(x, y)));
-			numTiles++;
-		});
+			return true;
+		};
+		auto markPresent = [&](std::vector<uint8_t> &present, TileCoordinate x, TileCoordinate y) {
+			if (zoom > pieceZoom)
+				present[((size_t)(x >> (zoom - pieceZoom)) << pieceZoom) + (y >> (zoom - pieceZoom))] = 1;
+		};
+		size_t numTiles = 0;
+		const auto *precise = dynamic_cast<const PreciseTileCoordinatesSet*>(zoomResult.get());
+		const TileCoordinate dim = 1u << std::min(zoom, 30u);
+		if (precise && zoom >= 6 && options.threadNum > 1) {
+			// Column stripes in parallel (z14 alone has ~260M tiles on the planet); the order
+			// doesn't matter, the list is sorted below.
+			const size_t stripes = std::min<size_t>(dim, options.threadNum * 8);
+			std::vector<std::vector<std::pair<unsigned int, TileCoordinates>>> parts(stripes);
+			std::vector<std::vector<uint8_t>> presents(options.threadNum);
+			std::atomic<size_t> nextStripe(0);
+			boost::asio::thread_pool pool(options.threadNum);
+			for (unsigned t = 0; t < options.threadNum; t++) {
+				boost::asio::post(pool, [&, t]() {
+					std::vector<uint8_t> &present = presents[t];
+					present.assign(piecePresent.size(), 0);
+					for (size_t s = nextStripe++; s < stripes; s = nextStripe++) {
+						const TileCoordinate x0 = (uint64_t)dim * s / stripes, x1 = (uint64_t)dim * (s + 1) / stripes;
+						precise->forEachSetInColumns(x0, x1, [&](TileCoordinate x, TileCoordinate y) {
+							if (!keep(x, y)) return;
+							parts[s].emplace_back(zoom, TileCoordinates(x, y));
+							markPresent(present, x, y);
+						});
+					}
+				});
+			}
+			pool.join();
+			for (auto &part : parts) {
+				numTiles += part.size();
+				listParts.emplace_back(std::move(part));
+			}
+			for (auto const &present : presents)
+				for (size_t i = 0; i < present.size(); i++) piecePresent[i] |= present[i];
+		} else {
+			listParts.emplace_back();
+			auto &part = listParts.back();
+			zoomResult->forEachSet([&](TileCoordinate x, TileCoordinate y) {
+				if (!keep(x, y)) return;
+				part.push_back(std::make_pair(zoom, TileCoordinates(x, y)));
+				markPresent(piecePresent, x, y);
+				numTiles++;
+			});
+		}
 
 		std::cout << " (" << numTiles;
 #ifdef CLOCK_MONOTONIC
@@ -504,11 +638,83 @@ int main(const int argc, const char* argv[]) {
 		std::cout << ")" << std::flush;
 	}
 	zoomResults.clear();
+	const unsigned listMaxZoom = std::max<unsigned>(CLUSTER_ZOOM, sharedData.config.endZoom);
+	const bool keyedSort = tileCoordinates.empty() && 2 * (listMaxZoom - CLUSTER_ZOOM) + 12 + 5 + 1 <= 64;
+	if (keyedSort) {
+		std::vector<size_t> offsets(listParts.size() + 1, 0);
+		for (size_t i = 0; i < listParts.size(); i++) offsets[i + 1] = offsets[i] + listParts[i].size();
+		const size_t total = offsets.back();
+		// The sorted list's storage: resize() writes every element from one thread, which on fresh
+		// memory is mostly page faults (1.8 s for 346M tiles). Touch it on all threads first, then let
+		// one thread resize it while the keys are built and sorted.
+		tileCoordinates.reserve(total);
+		{
+			char *storage = reinterpret_cast<char *>(tileCoordinates.data());
+			const size_t bytes = total * sizeof(tileCoordinates[0]), chunk = 64 << 20;
+			std::atomic<size_t> nextChunk(0);
+			boost::asio::thread_pool touchPool(options.threadNum);
+			for (unsigned t = 0; t < options.threadNum; t++) {
+				boost::asio::post(touchPool, [&]() {
+					for (size_t c = nextChunk++; c * chunk < bytes; c = nextChunk++)
+						std::memset(storage + c * chunk, 0, std::min(chunk, bytes - c * chunk));
+				});
+			}
+			touchPool.join();
+		}
+		std::thread resizer([&]() { tileCoordinates.resize(total); });
+		std::unique_ptr<uint64_t[]> keys(new uint64_t[std::max<size_t>(1, total)]);	// not zeroed: every slot is written
+		{
+			std::atomic<size_t> nextPart(0);
+			boost::asio::thread_pool keyPool(options.threadNum);
+			for (unsigned t = 0; t < options.threadNum; t++) {
+				boost::asio::post(keyPool, [&]() {
+					for (size_t i = nextPart++; i < listParts.size(); i = nextPart++) {
+						uint64_t *out = keys.get() + offsets[i];
+						for (const auto &tile : listParts[i]) *out++ = tileOrderKey(tile.first, tile.second.x, tile.second.y, listMaxZoom);
+						std::vector<std::pair<unsigned int, TileCoordinates>>().swap(listParts[i]);
+					}
+				});
+			}
+			keyPool.join();
+		}
+		listParts.clear();
+		sortTileKeys(keys.get(), total, options.threadNum);
+		resizer.join();
+		{
+			const size_t chunk = 1 << 20;
+			std::atomic<size_t> nextChunk(0);
+			boost::asio::thread_pool decodePool(options.threadNum);
+			for (unsigned t = 0; t < options.threadNum; t++) {
+				boost::asio::post(decodePool, [&]() {
+					for (size_t c = nextChunk++; c * chunk < total; c = nextChunk++)
+						for (size_t i = c * chunk; i < std::min(total, (c + 1) * chunk); i++)
+							tileCoordinates[i] = tileFromOrderKey(keys[i], listMaxZoom);
+				});
+			}
+			decodePool.join();
+		}
+	} else {
+		std::vector<size_t> offsets(listParts.size() + 1, tileCoordinates.size());
+		for (size_t i = 0; i < listParts.size(); i++) offsets[i + 1] = offsets[i] + listParts[i].size();
+		tileCoordinates.resize(offsets.back());
+		std::atomic<size_t> nextPart(0);
+		boost::asio::thread_pool copyPool(options.threadNum);
+		for (unsigned t = 0; t < options.threadNum; t++) {
+			boost::asio::post(copyPool, [&]() {
+				for (size_t i = nextPart++; i < listParts.size(); i = nextPart++) {
+					std::copy(listParts[i].begin(), listParts[i].end(), tileCoordinates.begin() + offsets[i]);
+					std::vector<std::pair<unsigned int, TileCoordinates>>().swap(listParts[i]);
+				}
+			});
+		}
+		copyPool.join();
+		listParts.clear();
+	}
 
 	std::cout << std::endl;
 
-	// Cluster tiles: breadth-first for z0..z5, depth-first for z6
-	sortTileCoordinates(config.baseZoom, options.threadNum, tileCoordinates);
+	// Cluster tiles: breadth-first for z0..z5, depth-first for z6 (already done by the keyed sort)
+	if (!keyedSort) sortTileCoordinates(config.baseZoom, options.threadNum, tileCoordinates);
 
 	OsmLuaProcessing::printMemoStats();
 
@@ -517,11 +723,6 @@ int main(const int argc, const char* argv[]) {
 
 	// Shared pieces of large polygons, for the SHARED_PIECE_ZOOM tiles below which a tile is written
 	{
-		const unsigned pieceZoom = TileDataSource::SHARED_PIECE_ZOOM;
-		std::vector<bool> piecePresent((size_t)1 << (2 * pieceZoom), false);
-		for (auto const &t : tileCoordinates)
-			if (t.first > pieceZoom)
-				piecePresent[((size_t)(t.second.x >> (t.first - pieceZoom)) << pieceZoom) + (t.second.y >> (t.first - pieceZoom))] = true;
 		auto present = [&](TileCoordinate x, TileCoordinate y) {
 			return x < (1u << pieceZoom) && y < (1u << pieceZoom) && piecePresent[((size_t)x << pieceZoom) + y];
 		};
@@ -533,7 +734,6 @@ int main(const int argc, const char* argv[]) {
 	// Batches are handed out as threads become free rather than all posted up
 	// front: a planet has ~14M of them, and their queued handlers held GBs.
 	std::mutex batchMutex;
-	std::size_t nextBatchStart = 0;
 	uint64_t nextBatchSeq = 0;
 	// Shared pieces (TileDataSource::precomputeSharedPieces) lie inside one z6 tile. Tiles from z6 on
 	// are written z6 tile by z6 tile, so once the hand-out has moved past a z6 tile and none of its
@@ -548,57 +748,264 @@ int main(const int argc, const char* argv[]) {
 	auto releaseZ6 = [&](int64_t b) {
 		for (auto source : sources) source->releaseSharedPieces(b / CLUSTER_ZOOM_WIDTH, b % CLUSTER_ZOOM_WIDTH);
 	};
-	static thread_local std::vector<int64_t> batchZ6;	// z6 tiles of the batch this thread is working on
-	auto nextBatch = [&](std::size_t &startIndex, std::size_t &batchSize, uint64_t &seq) {
-		const std::lock_guard<std::mutex> lock(batchMutex);
-		startIndex = nextBatchStart;
-		seq = nextBatchSeq++;
-		// Compute how many tiles should be assigned to this batch --
-		// higher-zoom tiles are cheaper to compute, lower-zoom tiles more expensive.
-		batchSize = 0;
-		size_t weight = 0;
-		// Batches are a fixed partition: each z<=11 tile is its own batch, and
-		// z12 subtrees are grouped (~2 per batch), so z13/z14 tiles usually share
-		// a batch with their z12 ancestor (batch-local ClipCache can reuse its clips).
-		// The partition doesn't depend on thread count, so neither does the output.
-		while (startIndex + batchSize < tileCoordinates.size()) {
-			const auto& zoom = tileCoordinates[startIndex + batchSize].first;
-			if (batchSize > 0 && (weight >= 1000 || (weight >= 50 && zoom <= cutZoom)))
-				break;
-			if (zoom > 12)
-				weight++;
-			else if (zoom > 11)
-				weight += 10;
-			else if (zoom > 10)
-				weight += 100;
-			else
-				weight += 1000;
-
-			batchSize++;
+	// Batches are a fixed partition: each z<=11 tile is its own batch, and
+	// z12 subtrees are grouped (~2 per batch), so z13/z14 tiles usually share
+	// a batch with their z12 ancestor (batch-local ClipCache can reuse its clips).
+	// The partition doesn't depend on thread count, so neither does the output.
+	std::vector<std::size_t> batchStarts;	// batch i: tiles batchStarts[i] .. batchStarts[i+1]
+	// Appends the starts of the batches from `start` (a batch start) on, up to `stop`. Returns
+	// whether `stop` is a batch start.
+	auto scanBatches = [&](std::size_t start, std::size_t stop, std::vector<std::size_t>& starts) {
+		while (start < stop) {
+			starts.push_back(start);
+			// Higher-zoom tiles are cheaper to compute, lower-zoom tiles more expensive
+			std::size_t size = 0, weight = 0;
+			while (start + size < tileCoordinates.size()) {
+				const auto& zoom = tileCoordinates[start + size].first;
+				if (size > 0 && (weight >= 1000 || (weight >= 50 && zoom <= cutZoom)))
+					break;
+				if (zoom > 12)
+					weight++;
+				else if (zoom > 11)
+					weight += 10;
+				else if (zoom > 10)
+					weight += 100;
+				else
+					weight += 1000;
+				size++;
+			}
+			start += size;
 		}
-		nextBatchStart += batchSize;
+		return start == stop;
+	};
+	{
+		// One pass over the planet's 346M tiles took 0.5 s on one thread. The list is cut into parts
+		// at tiles expected to start a batch: after a tile of z11 or below (weight >= 100), the next
+		// tile of z12 or below is one (unless a run of 1000 z13/z14 tiles came between). Each part is
+		// scanned from its start on its own; if a part doesn't end exactly at the next one's start,
+		// the expectation was wrong and the whole list is scanned again, from the start.
+		const std::size_t n = tileCoordinates.size();
+		std::vector<std::size_t> cuts { 0 };
+		const std::size_t numParts = options.threadNum > 1 ? (std::size_t)options.threadNum * 4 : 1;
+		for (std::size_t k = 1; k < numParts; k++) {
+			std::size_t i = std::max(cuts.back() + 1, n * k / numParts);
+			while (i < n && tileCoordinates[i].first > 11) i++;
+			i++;
+			while (i < n && tileCoordinates[i].first > cutZoom) i++;
+			if (i < n) cuts.push_back(i);
+		}
+		cuts.push_back(n);
+		std::vector<std::vector<std::size_t>> partStarts(cuts.size() - 1);
+		std::atomic<bool> allExact(true);
+		std::atomic<std::size_t> nextPart(0);
+		{
+			boost::asio::thread_pool partPool(options.threadNum);
+			for (unsigned t = 0; t < options.threadNum; t++) {
+				boost::asio::post(partPool, [&]() {
+					for (std::size_t k; (k = nextPart++) < partStarts.size(); )
+						if (!scanBatches(cuts[k], cuts[k + 1], partStarts[k])) allExact = false;
+				});
+			}
+			partPool.join();
+		}
+		if (allExact) {
+			std::size_t total = 0;
+			for (const auto& part : partStarts) total += part.size();
+			batchStarts.reserve(total + 1);
+			for (auto& part : partStarts) {
+				batchStarts.insert(batchStarts.end(), part.begin(), part.end());
+				std::vector<std::size_t>().swap(part);
+			}
+		} else {
+			scanBatches(0, n, batchStarts);
+		}
+	}
+	batchStarts.push_back(tileCoordinates.size());
+	// Handed out first: the tiles up to this zoom. One of them can take half a minute (a fjord
+	// coast at z6/z7); in its place in the order, the batches after it piled up until all
+	// threads waited for it. They are written in their place all the same, and are small.
+	const unsigned prefetchZoom = 8;
+	// Consecutive batches are handed out and written in groups: on a planet there are ~14M
+	// batches, and taking and handing over each one (two shared locks) limited the tile phase.
+	// Each batch of a group is still worked on as its own batch, so the output is the same.
+	// Prefetched batches stay in groups of their own. groupStarts[g]: first batch of group g.
+	// With few batches per thread (an extract) they're handed out one by one, as grouping
+	// would only make the load less even; a planet has groups of 8 (4..8 measured best).
+	const std::size_t batchesPerThread = (batchStarts.size() - 1) / std::max(1u, options.threadNum);
+	std::size_t groupSize = std::min<std::size_t>(8, std::max<std::size_t>(1, batchesPerThread / 16384));
+	std::vector<std::size_t> groupStarts;
+	for (std::size_t b = 0; b + 1 < batchStarts.size(); ) {
+		groupStarts.push_back(b);
+		const bool prefetch = tileCoordinates[batchStarts[b]].first <= prefetchZoom;
+		std::size_t n = 1;
+		while (!prefetch && n < groupSize && b + n + 1 < batchStarts.size() && tileCoordinates[batchStarts[b + n]].first > prefetchZoom) n++;
+		b += n;
+	}
+	groupStarts.push_back(batchStarts.size() - 1);
+	std::cout << "Tile batches: " << (batchStarts.size() - 1) << " in " << (groupStarts.size() - 1) << " groups of up to " << groupSize << std::endl;
+	std::vector<uint64_t> handOutOrder;	// group numbers
+	handOutOrder.reserve(groupStarts.size() - 1);
+	for (uint64_t g = 0; g + 1 < groupStarts.size(); g++)
+		if (tileCoordinates[batchStarts[groupStarts[g]]].first <= prefetchZoom) handOutOrder.push_back(g);
+	const std::size_t prefetched = handOutOrder.size();
+	for (uint64_t g = 0; g + 1 < groupStarts.size(); g++)
+		if (tileCoordinates[batchStarts[groupStarts[g]]].first > prefetchZoom) handOutOrder.push_back(g);
+	std::size_t nextHandOut = 0;
+
+	// The groups expected to be slowest (a big city's z12 tiles took up to 7 s, while all the
+	// batches behind it waited to be written; at the end of the planet the tiles only came out 4 s
+	// after the rest was done) are handed out ahead of their place, when the hand-out comes within
+	// slowWindow groups of them. Expected cost: the objects in the group's z12 tiles (a z13 tile a
+	// quarter of its z12 tile's, a z11 tile its four z12 tiles', ...).
+	std::vector<std::size_t> slowPos;	// positions in handOutOrder, ascending
+	std::vector<uint8_t> handedEarly(handOutOrder.size(), 0);
+	std::size_t nextSlow = 0, slowWindow = 0;
+	if (!z12ObjectCounts.empty() && handOutOrder.size() > prefetched) {
+		const double slowFraction = 0.001, windowFraction = 0.05;
+		const std::size_t n = handOutOrder.size() - prefetched;
+		std::vector<double> cost(n, 0);
+		{
+			std::atomic<std::size_t> nextChunk(0);
+			const std::size_t chunk = 4096;
+			boost::asio::thread_pool costPool(options.threadNum);
+			for (unsigned t = 0; t < options.threadNum; t++) {
+				boost::asio::post(costPool, [&]() {
+					for (std::size_t c = nextChunk++; c * chunk < n; c = nextChunk++) {
+						for (std::size_t k = c * chunk; k < std::min(n, (c + 1) * chunk); k++) {
+							const uint64_t g = handOutOrder[prefetched + k];
+							double sum = 0;
+							for (std::size_t i = batchStarts[groupStarts[g]]; i < batchStarts[groupStarts[g + 1]]; i++) {
+								const unsigned z = tileCoordinates[i].first;
+								const TileCoordinates &tc = tileCoordinates[i].second;
+								if (z >= 12) {
+									sum += z12ObjectCounts[((size_t)(tc.x >> (z - 12)) << 12) | (tc.y >> (z - 12))] / double(1ull << (2 * (z - 12)));
+								} else {
+									const unsigned d = 12 - z;
+									for (TileCoordinate x = tc.x << d; x < (tc.x + 1) << d; x++)
+										for (TileCoordinate y = tc.y << d; y < (tc.y + 1) << d; y++)
+											sum += z12ObjectCounts[((size_t)x << 12) | y];
+								}
+							}
+							cost[k] = sum;
+						}
+					}
+				});
+			}
+			costPool.join();
+		}
+		const std::size_t slowCount = std::min(n, (std::size_t)(n * slowFraction));
+		if (slowCount > 0) {
+			std::vector<double> sorted(cost);
+			std::nth_element(sorted.begin(), sorted.begin() + (n - slowCount), sorted.end());
+			const double threshold = sorted[n - slowCount];
+			for (std::size_t k = 0; k < n && slowPos.size() < slowCount; k++)
+				if (cost[k] >= threshold && cost[k] > 0) slowPos.push_back(prefetched + k);
+			slowWindow = std::max<std::size_t>(1, (std::size_t)(n * windowFraction));
+			std::cout << "Groups handed out early: " << slowPos.size() << " (expected cost >= " << threshold << "), up to " << slowWindow << " groups ahead" << std::endl;
+		}
+		std::vector<uint32_t>().swap(z12ObjectCounts);
+	}
+
+	// Work stealing at the end. A group's tiles are worked on in units: a batch is cut before each tile
+	// of z12 or below (cutZoom), so a unit is a tile below z12, or a z12 tile with its descendants.
+	// The thread the group was handed out to takes its units from the front; once all groups are
+	// handed out, threads that ran out of work take units from the back of the groups still being
+	// worked on (at the end of a planet run, one group of 172 tiles ran on alone for 2 s).
+	// - A unit's tiles reuse clips only of their ancestors in the same unit (ClipCache), and the
+	//   covered-z12 reuse starts at its z12 tile, so a unit comes out the same on any thread and
+	//   after any other unit; a thread starts a new clip-cache batch at a batch start, and wherever
+	//   it doesn't go on with the unit right after its last one.
+	// - The writers number the units (batch << 16 | unit within the batch) and write them in that
+	//   order, a run of units worked on one after another as one, so the file stays the same.
+	struct GroupWork {
+		std::mutex m;
+		bool active = false;
+		uint64_t group = 0;
+		std::vector<std::size_t> unitStart;	// tile index; units are followed by the next one's start
+		std::vector<uint64_t> unitKey;	// writer number; unitKey.back() is the number after the group
+		std::vector<uint8_t> unitNoStore;	// in a batch of a single tile
+		std::size_t front = 0, back = 0;	// units not taken yet: front .. back-1
+	};
+	std::vector<std::unique_ptr<GroupWork>> groupWork;
+	for (unsigned t = 0; t < options.threadNum; t++) groupWork.emplace_back(new GroupWork());
+	std::atomic<unsigned> nextWorker(0);
+	std::vector<uint8_t> groupCountsZ6(groupStarts.size() - 1, 0);
+	static thread_local std::vector<int64_t> batchZ6;	// z6 tiles of the batch this thread is working on
+	// Groups handed out ahead of their place (prefetched, slow) are held until their turn. When that
+	// is more than the writer may hold, the threads must not all wait (waitForRoom) while the group
+	// to be written next isn't handed out: the writer is told the first group in file order not
+	// handed out yet, and lets one thread go on to take it.
+	const std::size_t numGroups = groupStarts.size() - 1;
+	std::vector<uint8_t> groupTaken(numGroups, 0);
+	std::vector<std::size_t> handOutPos(numGroups);	// position in handOutOrder
+	for (std::size_t k = 0; k < handOutOrder.size(); k++) handOutPos[handOutOrder[k]] = k;
+	std::size_t firstUntaken = 0;
+	// its first unit's writer number (see GroupWork)
+	std::atomic<uint64_t> firstUntakenKey(numGroups > 0 ? (uint64_t)groupStarts[0] << 16 : UINT64_MAX);
+	// Hands out the next group: returns 0 if none is left, 1 if one is. With `needed` (a writer
+	// number from waitForRoom), only the group starting with it, the first in file order not handed
+	// out yet: 2 if it was handed out meanwhile.
+	auto nextBatch = [&](std::size_t &startIndex, std::size_t &batchSize, uint64_t &seq, uint64_t needed) -> int {
+		const std::lock_guard<std::mutex> lock(batchMutex);
 		batchZ6.clear();
+		while (nextHandOut < handOutOrder.size() && handedEarly[nextHandOut]) nextHandOut++;
+		while (nextSlow < slowPos.size() && (slowPos[nextSlow] < nextHandOut || handedEarly[slowPos[nextSlow]])) nextSlow++;
+		if (nextHandOut >= handOutOrder.size()) return 0;
+		// A slow group coming up soon goes first; it doesn't move the hand-out on (z6HandedOut)
+		bool early = false;
+		std::size_t k;
+		if (needed != UINT64_MAX) {
+			if (firstUntaken >= numGroups || ((uint64_t)groupStarts[firstUntaken] << 16) != needed) return 2;
+			k = handOutPos[firstUntaken];
+			if (k == nextHandOut) {
+				nextHandOut++;
+			} else {
+				handedEarly[k] = 1;
+				early = true;
+			}
+		} else if (nextSlow < slowPos.size() && slowPos[nextSlow] > nextHandOut && slowPos[nextSlow] <= nextHandOut + slowWindow) {
+			k = slowPos[nextSlow++];
+			handedEarly[k] = 1;
+			early = true;
+		} else {
+			k = nextHandOut++;
+		}
+		seq = handOutOrder[k];
+		startIndex = batchStarts[groupStarts[seq]];
+		batchSize = batchStarts[groupStarts[seq + 1]] - startIndex;
+		groupTaken[seq] = 1;
+		while (firstUntaken < numGroups && groupTaken[firstUntaken]) firstUntaken++;
+		firstUntakenKey = firstUntaken < numGroups ? (uint64_t)groupStarts[firstUntaken] << 16 : UINT64_MAX;
+		// Prefetched tiles don't use the shared pieces, and are out of order: only the others count
+		// for releasing the pieces of z6 tiles the hand-out has moved past
+		if (k < prefetched) return 1;
+		groupCountsZ6[seq] = 1;
 		for (std::size_t i = startIndex; i < startIndex + batchSize; i++) {
 			const int64_t b = z6Of(i);
 			if (b >= 0 && (batchZ6.empty() || batchZ6.back() != b)) batchZ6.push_back(b);
 		}
 		for (int64_t b : batchZ6) z6Running[b]++;
-		if (!batchZ6.empty() && batchZ6.back() != z6HandedOut) {
+		if (!early && !batchZ6.empty() && batchZ6.back() != z6HandedOut) {
 			if (z6HandedOut >= 0 && z6Running[z6HandedOut] == 0) releaseZ6(z6HandedOut);
 			z6HandedOut = batchZ6.back();
 		}
-		return batchSize > 0;
+		return 1;
 	};
 
 	// .pmtiles and .mbtiles are written in batch order, so the file doesn't depend on thread scheduling
 	const bool toPMTiles = options.outputMode == OptionsParser::OutputMode::PMTiles;
 	const bool toMBTiles = options.outputMode == OptionsParser::OutputMode::MBTiles;
-	// While an earlier batch is still being worked on, each thread may run ahead by about
-	// 64 MB of finished tiles. With less, threads often wait for a slow batch (mostly a
-	// dense z12 area), above all when two threads share a core and each runs at half speed.
-	const uint64_t maxHeldBytes = (64ull << 20) * options.threadNum;
+	// While an earlier batch is still being worked on, threads may run ahead by 1/16 of the memory
+	// (physical RAM, or the cgroup limit if lower), at least 64 MB of finished tiles per thread and at
+	// most 4 GB. With less, threads often wait for a slow batch (a dense z12 area, or a big
+	// multipolygon read from --store files), above all when two threads share a core and each runs at
+	// half speed: a 16-thread planet with --store took 54 min with 1 GB, 25 min with 4 GB.
+	const uint64_t maxHeldBytes = std::max<uint64_t>((64ull << 20) * options.threadNum,
+		std::min<uint64_t>(4ull << 30, availableMemoryBytes() / 16));
 	if (toPMTiles) sharedData.pmtiles.batches.setMaxHeldBytes(maxHeldBytes);
 	if (toMBTiles) sharedData.mbtiles.batches.setMaxHeldBytes(maxHeldBytes);
+	if (toPMTiles) sharedData.pmtiles.batches.setFirstUnhanded(&firstUntakenKey);
+	if (toMBTiles) sharedData.mbtiles.batches.setFirstUnhanded(&firstUntakenKey);
 
 	// Below a z12 tile whose objects, down to the last zoom, are all polygons covering the whole
 	// tile (open sea, large forests or ice), every tile of a zoom comes out the same: one per zoom
@@ -655,25 +1062,59 @@ int main(const int argc, const char* argv[]) {
 		boost::asio::post(pool, [&]() {
 			std::size_t startIndex, batchSize;
 			uint64_t seq;
+			GroupWork &mine = *groupWork[nextWorker++];
 			// Shared pieces first (see TileDataSource::precomputeSharedPieces)
 			for (auto source : sources) source->computeSharedPieces();
-			while (true) {
-				if (toPMTiles) sharedData.pmtiles.batches.waitForRoom();
-				if (toMBTiles) sharedData.mbtiles.batches.waitForRoom();
-				if (!nextBatch(startIndex, batchSize, seq)) break;
-				if (toPMTiles) sharedData.pmtiles.batches.begin(seq);
-				if (toMBTiles) sharedData.mbtiles.batches.begin(seq);
-				clipCacheBatchId = ++batchCounter;
+			std::vector<std::string> tileTimings;
+			std::vector<std::string> coverTiles(config.endZoom + 1);
+			std::vector<bool> coverDone(config.endZoom + 1);
+			auto beginWriting = [&](uint64_t key) {
+				if (toPMTiles) sharedData.pmtiles.batches.begin(key);
+				if (toMBTiles) sharedData.mbtiles.batches.begin(key);
+			};
+			auto endWriting = [&](uint64_t nextKey) {
+				if (toPMTiles) { sharedData.pmtiles.batches.setNext(nextKey); sharedData.pmtiles.batches.end(); }
+				if (toMBTiles) { sharedData.mbtiles.batches.setNext(nextKey); sharedData.mbtiles.batches.end(); }
+			};
+			auto showProgress = [&](std::size_t startIndex) {
+				if (io_mutex.try_lock()) {
+					uint64_t written = tilesWritten.load();
+
+					if (written >= lastTilesWritten + tileCoordinates.size() / 100 || ISATTY) {
+						lastTilesWritten = written;
+						// Show progress grouped by z6 (or lower)
+						size_t z = tileCoordinates[startIndex].first;
+						size_t x = tileCoordinates[startIndex].second.x;
+						size_t y = tileCoordinates[startIndex].second.y;
+						if (z > CLUSTER_ZOOM) {
+							x = x / (1 << (z - CLUSTER_ZOOM));
+							y = y / (1 << (z - CLUSTER_ZOOM));
+							z = CLUSTER_ZOOM;
+						}
+						cout << "z" << z << "/" << x << "/" << y << ", writing tile " << written << " of " << tileCoordinates.size() << "               \r" << std::flush;
+					}
+					io_mutex.unlock();
+				}
+			};
+			auto showTimings = [&]() {
+				if (options.logTileTimings) {
+					const std::lock_guard<std::mutex> lock(io_mutex);
+					std::cout << std::endl;
+					for (const auto& output : tileTimings)
+						std::cout << output << std::endl;
+				}
+				tileTimings.clear();
+			};
+			// The tiles batchBegin .. endIndex-1 (a unit), in a new clip-cache batch or going on with
+			// the current one
+			auto workOnTiles = [&](std::size_t batchBegin, std::size_t endIndex, bool newCacheBatch, bool noStore) {
+				if (newCacheBatch) clipCacheBatchId = ++batchCounter;
 				// A single-tile batch has no descendants to reuse its clips.
-				clipCacheNoStore = batchSize == 1;
-				std::vector<std::string> tileTimings;
-				std::size_t endIndex = std::min(tileCoordinates.size(), startIndex + batchSize);
-				// The covered z12 tile of this batch, and the tiles saved for its descendants per zoom
+				clipCacheNoStore = noStore;
+				// The covered z12 tile of this unit, and the tiles saved for its descendants per zoom
 				bool coverActive = false;
 				TileCoordinates coverRoot(0, 0);
-				std::vector<std::string> coverTiles(config.endZoom + 1);
-				std::vector<bool> coverDone(config.endZoom + 1);
-				for(std::size_t i = startIndex; i < endIndex; ++i) {
+				for(std::size_t i = batchBegin; i < endIndex; ++i) {
 					unsigned int zoom = tileCoordinates[i].first;
 					TileCoordinates coords = tileCoordinates[i].second;
 
@@ -713,46 +1154,120 @@ int main(const int argc, const char* argv[]) {
 					}
 #endif
 				}
+			};
 
-				if (options.logTileTimings) {
-					const std::lock_guard<std::mutex> lock(io_mutex);
-					std::cout << std::endl;
-					for (const auto& output : tileTimings)
-						std::cout << output << std::endl;
+			// The groups handed out to this thread
+			while (true) {
+				uint64_t needed = UINT64_MAX;
+				if (toPMTiles) needed = sharedData.pmtiles.batches.waitForRoom();
+				if (toMBTiles) needed = sharedData.mbtiles.batches.waitForRoom();
+				const int got = nextBatch(startIndex, batchSize, seq, needed);
+				if (got == 0) break;
+				if (got == 2) continue;
+				{
+					// The group's units, open to other threads from now on
+					std::lock_guard<std::mutex> lock(mine.m);
+					mine.unitStart.clear(); mine.unitKey.clear(); mine.unitNoStore.clear();
+					for (std::size_t b = groupStarts[seq]; b < groupStarts[seq + 1]; b++) {
+						uint64_t unit = 0;
+						for (std::size_t i = batchStarts[b]; i < batchStarts[b + 1]; i++) {
+							if (i > batchStarts[b] && tileCoordinates[i].first > cutZoom) continue;
+							mine.unitStart.push_back(i);
+							mine.unitKey.push_back(((uint64_t)b << 16) | unit++);
+							mine.unitNoStore.push_back(batchStarts[b + 1] - batchStarts[b] == 1);
+						}
+					}
+					mine.unitStart.push_back(startIndex + batchSize);
+					mine.unitKey.push_back((uint64_t)groupStarts[seq + 1] << 16);
+					mine.group = seq;
+					mine.front = 0;
+					mine.back = mine.unitNoStore.size();
+					mine.active = true;
 				}
+				// Consecutive units are written as one run
+				std::size_t tilesDone = 0;
+				bool writing = false;
+				std::size_t last = 0;
+				while (true) {
+					std::size_t u;
+					{
+						std::lock_guard<std::mutex> lock(mine.m);
+						if (mine.front >= mine.back) { mine.active = false; break; }
+						u = mine.front++;
+					}
+					const bool goesOn = writing && u == last + 1;
+					if (writing && !goesOn) { endWriting(mine.unitKey[last + 1]); writing = false; }
+					if (!writing) { beginWriting(mine.unitKey[u]); writing = true; }
+					// a new clip-cache batch at a batch start, and after a gap
+					workOnTiles(mine.unitStart[u], mine.unitStart[u + 1], !goesOn || (mine.unitKey[u] & 0xffff) == 0, mine.unitNoStore[u]);
+					tilesDone += mine.unitStart[u + 1] - mine.unitStart[u];
+					last = u;
+				}
+				if (writing) endWriting(mine.unitKey[last + 1]);
+				tilesWritten += tilesDone;
+				showTimings();
 
 				{
 					const std::lock_guard<std::mutex> lock(batchMutex);
+					// z6 tiles the hand-out has moved past (an early group's may still be ahead of it)
 					for (int64_t b : batchZ6)
-						if (--z6Running[b] == 0 && b != z6HandedOut) releaseZ6(b);
+						if (--z6Running[b] == 0 && b < z6HandedOut) releaseZ6(b);
 				}
-				if (toPMTiles) sharedData.pmtiles.batches.end();
-				if (toMBTiles) sharedData.mbtiles.batches.end();
-				tilesWritten += (endIndex - startIndex); 
+				showProgress(startIndex);
+			}
 
-				if (io_mutex.try_lock()) {
-					uint64_t written = tilesWritten.load();
-
-					if (written >= lastTilesWritten + tileCoordinates.size() / 100 || ISATTY) {
-						lastTilesWritten = written;
-						// Show progress grouped by z6 (or lower)
-						size_t z = tileCoordinates[startIndex].first;
-						size_t x = tileCoordinates[startIndex].second.x;
-						size_t y = tileCoordinates[startIndex].second.y;
-						if (z > CLUSTER_ZOOM) {
-							x = x / (1 << (z - CLUSTER_ZOOM));
-							y = y / (1 << (z - CLUSTER_ZOOM));
-							z = CLUSTER_ZOOM;
-						}
-						cout << "z" << z << "/" << x << "/" << y << ", writing tile " << written << " of " << tileCoordinates.size() << "               \r" << std::flush;
+			// All groups are handed out: take the last units not started yet of the groups still
+			// being worked on
+			while (true) {
+				if (toPMTiles) sharedData.pmtiles.batches.waitForRoom();
+				if (toMBTiles) sharedData.mbtiles.batches.waitForRoom();
+				std::size_t from = 0, to = 0;
+				uint64_t key = 0, nextKey = 0;
+				bool noStore = false, found = false;
+				{
+					// Under batchMutex, so that the owner can't release the unit's z6 tiles meanwhile
+					const std::lock_guard<std::mutex> lock(batchMutex);
+					batchZ6.clear();
+					uint64_t group = 0;
+					for (auto &work : groupWork) {
+						std::lock_guard<std::mutex> workLock(work->m);
+						if (!work->active || work->front >= work->back) continue;
+						const std::size_t u = --work->back;
+						from = work->unitStart[u]; to = work->unitStart[u + 1];
+						key = work->unitKey[u]; nextKey = work->unitKey[u + 1];
+						noStore = work->unitNoStore[u];
+						group = work->group;
+						found = true;
+						break;
 					}
-					io_mutex.unlock();
+					if (found && groupCountsZ6[group]) {
+						// Its z6 tiles' shared pieces are kept until it is done
+						for (std::size_t i = from; i < to; i++) {
+							const int64_t z6 = z6Of(i);
+							if (z6 >= 0 && (batchZ6.empty() || batchZ6.back() != z6)) batchZ6.push_back(z6);
+						}
+						for (int64_t z6 : batchZ6) z6Running[z6]++;
+					}
 				}
+				if (!found) break;
+				beginWriting(key);
+				workOnTiles(from, to, true, noStore);
+				tilesWritten += to - from;
+				endWriting(nextKey);
+				showTimings();
+				{
+					const std::lock_guard<std::mutex> lock(batchMutex);
+					for (int64_t z6 : batchZ6)
+						if (--z6Running[z6] == 0 && z6 < z6HandedOut) releaseZ6(z6);
+				}
+				showProgress(from);
 			}
 		});
 	}
 	// Wait for all tasks in the pool to complete.
 	pool.join();
+	if (toPMTiles) sharedData.pmtiles.batches.setFirstUnhanded(nullptr);
+	if (toMBTiles) sharedData.mbtiles.batches.setFirstUnhanded(nullptr);
 
 	// ----	Close tileset
 

@@ -9,6 +9,7 @@
 #include <sstream>
 #include <type_traits>
 #include "tile_data.h"
+#include <tuple>
 #include "coordinates_geom.h"
 #include "leased_store.h"
 #include <unordered_map>
@@ -16,6 +17,7 @@
 #include "clip_line.h"
 
 thread_local unsigned objectsUpToZoom = 0;
+std::vector<uint32_t> z12ObjectCounts;
 #include <ciso646>
 
 using namespace std;
@@ -219,25 +221,27 @@ void TileDataSource::precomputeSharedPieces(const std::function<bool(TileCoordin
 void TileDataSource::computeSharedPieces() {
 	const unsigned zoom = SHARED_PIECE_ZOOM;
 	for (size_t i = nextPieceJob++; i < pieceJobs.size(); i = nextPieceJob++) {
-		const auto &key = pieceJobs[i].key;
-		auto piece = std::make_shared<SharedPiece>();
-		try {
-			clipCacheBypass = true;
-			clipNeededRepair = false;
-			Geometry g = buildWayGeometry(POLYGON_, std::get<0>(key), TileBbox(TileCoordinates(std::get<1>(key), std::get<2>(key)), zoom, false, false));
-			// A piece that needed the repair path can be wrong (once a lake came out empty), and
-			// every tile below it would inherit that: leave those tiles to clip the whole polygon.
-			if (!clipNeededRepair) {
-				piece->geom = std::make_shared<MultiPolygon>(std::move(boost::get<MultiPolygon>(g)));
-				// buildWayGeometry has just checked it (for a huge piece, is_valid takes seconds)
-				piece->valid = clipResultValid;
+		{
+			const auto &key = pieceJobs[i].key;
+			auto piece = std::make_shared<SharedPiece>();
+			try {
+				clipCacheBypass = true;
+				clipNeededRepair = false;
+				Geometry g = buildWayGeometry(POLYGON_, std::get<0>(key), TileBbox(TileCoordinates(std::get<1>(key), std::get<2>(key)), zoom, false, false));
+				// A piece that needed the repair path can be wrong (once a lake came out empty), and
+				// every tile below it would inherit that: leave those tiles to clip the whole polygon.
+				if (!clipNeededRepair) {
+					piece->geom = std::make_shared<MultiPolygon>(std::move(boost::get<MultiPolygon>(g)));
+					// buildWayGeometry has just checked it (for a huge piece, is_valid takes seconds)
+					piece->valid = clipResultValid;
+				}
+			} catch (std::exception &) {
+				// The tiles clip the whole polygon, and report the problem there
 			}
-		} catch (std::exception &) {
-			// The tiles clip the whole polygon, and report the problem there
+			clipCacheBypass = false;
+			pieceJobs[i].promise->set_value(piece);
+			pieceJobs[i].promise.reset();	// the map's future keeps the piece, until its z6 tile is released
 		}
-		clipCacheBypass = false;
-		pieceJobs[i].promise->set_value(piece);
-		pieceJobs[i].promise.reset();	// the map's future keeps the piece, until its z6 tile is released
 	}
 }
 
@@ -818,27 +822,64 @@ void populateTilesAtZoom(
 		for (size_t i = 0; i < sources.size(); i++)
 			sources[i]->collectTilesWithObjectsAtZoom(zooms);
 	} else {
-		// Objects are kept per z6 tile. Each worker takes whole columns of z6
-		// tiles (so that it touches only its part of the bitmaps), sets bits in
-		// bitmaps of its own, and these are merged at the end.
-		std::atomic<size_t> nextColumn(0);
-		std::vector<std::vector<std::shared_ptr<TileCoordinatesSet>>> local(threadNum);
-		boost::asio::thread_pool pool(threadNum);
-		for (size_t t = 0; t < threadNum; t++) {
-			boost::asio::post(pool, [&, t]() {
-				auto& mine = local[t];
-				for (size_t zoom = 0; zoom < zooms.size(); zoom++)
-					mine.push_back(std::make_shared<PreciseTileCoordinatesSet>(zoom));
-				for (size_t column; (column = nextColumn++) < CLUSTER_ZOOM_WIDTH; )
-					for (size_t row = 0; row < CLUSTER_ZOOM_WIDTH; row++)
-						for (const auto source : sources)
-							source->collectTilesWithObjectsInShard(column * CLUSTER_ZOOM_WIDTH + row, mine);
-			});
+		// Objects are kept per z6 tile. Each worker takes z6 tiles, the ones with the most
+		// objects first (by columns, one column held a tenth of the planet's objects and ran on
+		// alone), sets bits in bitmaps of its own, and these are merged at the end, all threads
+		// merging their part of the bitmaps. A z6 tile's z12 tiles (z12ObjectCounts) are only
+		// counted by the thread that takes it. The sets don't depend on who set which bit.
+		std::vector<std::pair<size_t, size_t>> order;	// (objects, z6 tile)
+		for (size_t shard = 0; shard < CLUSTER_ZOOM_AREA; shard++) {
+			size_t n = 0;
+			for (const auto source : sources) n += source->shardObjectCount(shard);
+			if (n > 0) order.emplace_back(n, shard);
 		}
-		pool.join();
-		for (const auto& mine : local)
-			for (size_t zoom = 0; zoom < mine.size(); zoom++)
-				precise[zoom]->merge(static_cast<const PreciseTileCoordinatesSet&>(*mine[zoom]));
+		std::sort(order.begin(), order.end(), [](const std::pair<size_t, size_t>& a, const std::pair<size_t, size_t>& b) {
+			return a.first != b.first ? a.first > b.first : a.second < b.second;
+		});
+		std::atomic<size_t> nextShard(0);
+		std::vector<std::vector<std::shared_ptr<TileCoordinatesSet>>> local(threadNum);
+		{
+			boost::asio::thread_pool pool(threadNum);
+			for (size_t t = 0; t < threadNum; t++) {
+				boost::asio::post(pool, [&, t]() {
+					auto& mine = local[t];
+					for (size_t zoom = 0; zoom < zooms.size(); zoom++)
+						mine.push_back(std::make_shared<PreciseTileCoordinatesSet>(zoom));
+					for (size_t k; (k = nextShard++) < order.size(); )
+						for (const auto source : sources)
+							source->collectTilesWithObjectsInShard(order[k].second, mine);
+				});
+			}
+			pool.join();
+		}
+		// Merge: (zoom, range of summary words) parts, each merging all threads' bitmaps
+		std::vector<std::tuple<size_t, size_t, size_t>> parts;
+		for (size_t zoom = 0; zoom < zooms.size(); zoom++) {
+			const size_t words = precise[zoom]->summaryWords();
+			const size_t step = std::max<size_t>(1, words / (threadNum * 4));
+			for (size_t from = 0; from < words; from += step) parts.emplace_back(zoom, from, std::min(words, from + step));
+		}
+		std::atomic<size_t> nextPart(0);
+		{
+			boost::asio::thread_pool pool(threadNum);
+			for (size_t t = 0; t < threadNum; t++) {
+				boost::asio::post(pool, [&]() {
+					for (size_t k; (k = nextPart++) < parts.size(); ) {
+						const size_t zoom = std::get<0>(parts[k]);
+						for (const auto& mine : local)
+							precise[zoom]->mergeRange(static_cast<const PreciseTileCoordinatesSet&>(*mine[zoom]), std::get<1>(parts[k]), std::get<2>(parts[k]));
+					}
+				});
+			}
+			pool.join();
+		}
+		// The threads' bitmaps (32 MB each at z14) are freed on all threads too
+		{
+			boost::asio::thread_pool pool(threadNum);
+			for (size_t t = 0; t < threadNum; t++)
+				boost::asio::post(pool, [&, t]() { local[t].clear(); });
+			pool.join();
+		}
 	}
 
 	for (size_t i = 0; i < sources.size(); i++)
