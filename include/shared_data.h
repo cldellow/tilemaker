@@ -98,6 +98,7 @@ public:
 	uint baseZoom, startZoom, endZoom;
 	TileFormat tileFormat;
 	uint mvtVersion, combineBelow;
+	int compressionLevel;	// libdeflate level for gzip/deflate tiles (1..12)
 	bool includeID, highResolution;
 	TileCompression compression;
 	std::string compressOpt;

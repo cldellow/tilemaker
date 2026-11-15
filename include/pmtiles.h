@@ -4,12 +4,13 @@
 
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 #include "external/pmtiles.hpp"
-#include "helpers.h"
 #include "ordered_batches.h"
+#include "helpers.h"
 
 struct TileOffset {
 	uint64_t offset : 40;
@@ -51,6 +52,7 @@ public:
 	pmtiles::headerv3 header;
 	bool isSparse = true;
 	uint8_t tileType = pmtiles::TILETYPE_MVT;
+	int compressionLevel = 6;	// for gzip tiles; the directories and metadata use the default
 	// gzip or zstd: the only tile compressions PMTiles defines that tilemaker writes
 	TileCompression tileCompression = TileCompression::Gzip;
 
@@ -63,9 +65,13 @@ public:
 
 private:
 	std::ofstream outputStream;
+	std::string filename;
+	std::vector<std::shared_ptr<void>> laterGarbage;	// freed with the object (see close)
 	std::vector<char> outputBuffer;	// a large stream buffer: one thread writes all tiles
+	// Tile data past the page cache (O_DIRECT), when the file system allows it - see pmtiles.cpp
+	struct DirectWriter;
+	std::unique_ptr<DirectWriter> direct;
 	uint64_t tileDataEnd = 0;	// bytes of tile data written so far (tellp() costs a flush and a seek per tile)
-	std::mutex fileMutex;	// guards leaf directory writes in close()
 	uint64_t leafStart = 0;
 	uint64_t numTilesWritten = 0;
 	uint64_t numTilesAddressed = 0;

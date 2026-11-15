@@ -76,7 +76,8 @@ void decompress_zstd(std::string& output, const char* input, size_t inputSize, s
 
 // Compress or decompress a tile with the configured method. TileCompression::None
 // passes the data through.
-std::string compress_tile(const std::string& str, TileCompression compression);
+// level is gzip's and deflate's (1..12); zstd tiles use zstd's default.
+std::string compress_tile(const std::string& str, TileCompression compression, int level = Z_DEFAULT_COMPRESSION);
 void decompress_tile(std::string& output, const char* input, size_t inputSize, TileCompression compression);
 
 std::string boost_validity_error(unsigned failure);
