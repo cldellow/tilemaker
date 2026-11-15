@@ -392,6 +392,7 @@ void encodeMvtTile(
 		std::size_t groups = 0, count = 0;
 		std::vector<std::array<uint64_t, 4>> group;
 		std::array<std::array<uint64_t, 4>, 32> zoom;
+		std::vector<std::pair<unsigned, unsigned>> outlines;	// (outline_of layer, its source layer)
 	};
 	thread_local LayerMasks masks;
 	if (masks.layers != &layers || masks.groups != layers.layerOrder.size() || masks.count != layers.layers.size()) {
@@ -407,7 +408,16 @@ void encodeMvtTile(
 			for (unsigned z = 0; z < 32; z++)
 				if (z >= layers.layers[layerNum].minzoom && z <= layers.layers[layerNum].maxzoom)
 					masks.zoom[z][(layerNum >> 6) & 3] |= uint64_t(1) << (layerNum & 63);
+		masks.outlines.clear();
+		for (std::size_t layerNum = 0; layerNum < masks.count; layerNum++)
+			if (layers.layers[layerNum].outlineOf >= 0)
+				masks.outlines.emplace_back(layerNum, layers.layers[layerNum].outlineOf);
 	}
+	// An outline_of layer has no objects of its own: it writes its source layer's polygons, so
+	// it's present wherever that layer is
+	for (const auto& o : masks.outlines)
+		if (present[(o.second >> 6) & 3] >> (o.second & 63) & 1)
+			present[(o.first >> 6) & 3] |= uint64_t(1) << (o.first & 63);
 	vtzero::tile_builder tile;
 	for (std::size_t group = 0; group < layers.layerOrder.size(); group++) {
 		if (stop) break;
