@@ -7,7 +7,7 @@ ARG BUILD_DEBUG=
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     build-essential \
-    liblua5.1-0-dev \
+    liblua5.4-dev \
     libsqlite3-dev \
     libshp-dev \
     libboost-program-options-dev \
@@ -20,7 +20,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     git \
     ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    luarocks install luaflock
+    luarocks --lua-version 5.4 install luaflock
 
 WORKDIR /usr/src/app
 
@@ -58,7 +58,8 @@ ARG TILEMAKER_VERSION=unknown
 LABEL Description="Tilemaker" Version="${TILEMAKER_VERSION}"
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    liblua5.1-0 \
+    liblua5.4-0 \
+    libjemalloc2 \
     shapelib \
     libsqlite3-0 \
     libzstd1 \
@@ -71,7 +72,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 WORKDIR /usr/src/app
 COPY --from=src /usr/src/app/build/tilemaker .
 COPY --from=src /usr/src/app/build/tilemaker-server .
-COPY --from=src /usr/local/lib/lua/5.1/flock.so /usr/local/lib/lua/5.1/flock.so
+COPY --from=src /usr/local/lib/lua/5.4/flock.so /usr/local/lib/lua/5.4/flock.so
 COPY server/static ./static
 COPY resources ./resources
 COPY VERSION ./
@@ -79,6 +80,10 @@ COPY process.lua ./
 COPY config.json ./
 
 ENV PATH="/usr/src/app/build:$PATH"
+
+# jemalloc, with transparent huge pages for its own memory too: about 8% faster on large runs
+# (docs/RUNNING.md). The entrypoint preloads it; set TM_NO_JEMALLOC to run with glibc's malloc.
+ENV MALLOC_CONF=thp:always,metadata_thp:always
 
 # Entrypoint for docker, wrapped with /bin/sh to remove requirement for executable permissions on script
 ENTRYPOINT ["/bin/sh", "/usr/src/app/resources/docker-entrypoint.sh"]
