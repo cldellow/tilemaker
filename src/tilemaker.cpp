@@ -512,6 +512,9 @@ int main(const int argc, const char* argv[]) {
 
 	OsmLuaProcessing::printMemoStats();
 
+	// Validity of big relations, checked while the rest was read (see checkValidityLater)
+	for (auto source : sources) source->finishDeferredValidity();
+
 	// Shared pieces of large polygons, for the SHARED_PIECE_ZOOM tiles below which a tile is written
 	{
 		const unsigned pieceZoom = TileDataSource::SHARED_PIECE_ZOOM;
