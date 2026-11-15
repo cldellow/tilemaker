@@ -271,6 +271,49 @@ void writeMultiPolygon(
 	writePolygonFeature<Backend>(vtLayer, sharedData.config.includeID, oo, current, attributeStore, zoom, attrMemo);
 }
 
+// An outline_of layer draws the same polygons as its source layer, in the same tile, so each
+// would be clipped twice. The clip cache only holds a tile's ancestors, and a polygon that isn't
+// valid as stored is clipped by Boost and repaired, so the second clip could cost as much as the
+// first (parks: an outline layer added 16 s to a 42 s tile phase in North America). The source
+// layer keeps its clips of the current tile here, and the outline layer takes them. A tile's
+// layers are all encoded on one thread, so this is per thread, and emptied at the next tile.
+namespace {
+struct TileClipMemo {
+	TileCoordinates index = TileCoordinates(0, 0);
+	unsigned zoom = ~0u;
+	struct KeyHash {
+		size_t operator()(const std::pair<const void*, NodeID> &k) const {
+			return std::hash<uint64_t>()(k.second * 0x9E3779B97F4A7C15ull ^ (uint64_t)(uintptr_t)k.first);
+		}
+	};
+	std::unordered_map<std::pair<const void*, NodeID>, MultiPolygon, KeyHash> clips;
+};
+thread_local TileClipMemo tileClipMemo;
+
+// A polygon's clip to bbox. share: the object is in a layer an outline_of layer draws (or in that
+// layer), so the clip is kept for, or taken from, the other one.
+Geometry buildPolygon(TileDataSource *source, NodeID objectID, const TileBbox &bbox, bool share) {
+	if (!share) return source->buildWayGeometry(POLYGON_, objectID, bbox);
+	TileClipMemo &m = tileClipMemo;
+	if (m.zoom != bbox.zoom || !(m.index == bbox.index)) {
+		m.clips.clear();
+		m.zoom = bbox.zoom;
+		m.index = bbox.index;
+	}
+	const auto key = std::make_pair((const void*)source, objectID);
+	auto it = m.clips.find(key);
+	if (it != m.clips.end()) {
+		// Each is used by the two layers: the second takes it
+		Geometry g = std::move(it->second);
+		m.clips.erase(it);
+		return g;
+	}
+	Geometry g = source->buildWayGeometry(POLYGON_, objectID, bbox);
+	m.clips.emplace(key, boost::get<MultiPolygon>(g));
+	return g;
+}
+}
+
 // Write the boundaries of a polygon's rings as lines (see outline_of), in the
 // same point order writeRing uses, so the polygon is on each line's right:
 // a style can offset a line into the polygon. Segments that lie on or beyond
@@ -370,7 +413,7 @@ void ProcessOutlines(
 		if (zoom < oo.oo.minZoom || oo.oo.geomType != POLYGON_) continue;
 		Geometry g;
 		try {
-			g = source->buildWayGeometry(oo.oo.geomType, oo.oo.objectID, bbox);
+			g = buildPolygon(source, oo.oo.objectID, bbox, true);
 		} catch (std::out_of_range &err) {
 			continue;
 		}
@@ -378,7 +421,7 @@ void ProcessOutlines(
 			std::vector<MultiPolygon> mps;
 			while (jt<(ooEnd-1) && oo.oo.compatible((jt+1)->oo)) {
 				jt++;
-				mps.emplace_back( boost::get<MultiPolygon>(source->buildWayGeometry(jt->oo.geomType, jt->oo.objectID, bbox)) );
+				mps.emplace_back( boost::get<MultiPolygon>(buildPolygon(source, jt->oo.objectID, bbox, true)) );
 			}
 			if (!mps.empty()) {
 				mps.emplace_back(boost::get<MultiPolygon>(g));
@@ -411,7 +454,8 @@ void ProcessObjects(
 	unsigned zoom,
 	const TileBbox &bbox,
 	typename Backend::LayerBuilder& vtLayer,
-	MvtAttributeMemo* attrMemo
+	MvtAttributeMemo* attrMemo,
+	bool outlineSource	// an outline_of layer draws this layer's polygons (see buildPolygon)
 ) {
 	for (auto jt = ooSameLayerBegin; jt != ooSameLayerEnd; ++jt) {
 		OutputObjectID oo = *jt;
@@ -459,7 +503,8 @@ void ProcessObjects(
 		} else {
 			Geometry g;
 			try {
-				g = source->buildWayGeometry(oo.oo.geomType, oo.oo.objectID, bbox);
+				g = oo.oo.geomType == POLYGON_ ? buildPolygon(source, oo.oo.objectID, bbox, outlineSource)
+				                               : source->buildWayGeometry(oo.oo.geomType, oo.oo.objectID, bbox);
 			} catch (std::out_of_range &err) {
 				if (verbose) cerr << "Error while processing geometry " << oo.oo.geomType << "," << static_cast<int>(oo.oo.objectID) <<"," << err.what() << endl;
 				continue;
@@ -488,7 +533,7 @@ void ProcessObjects(
 				while (jt<(ooSameLayerEnd-1) && oo.oo.compatible((jt+1)->oo)) {
 					jt++;
 					try {
-						mps.emplace_back( boost::get<MultiPolygon>(source->buildWayGeometry(jt->oo.geomType, jt->oo.objectID, bbox)) );
+						mps.emplace_back( boost::get<MultiPolygon>(buildPolygon(source, jt->oo.objectID, bbox, outlineSource)) );
 					} catch (std::out_of_range &err) {
 						if (verbose) cerr << "Error while processing geometry " << jt->oo.geomType << "," << static_cast<int>(jt->oo.objectID) <<"," << err.what() << endl;
 					}
@@ -574,6 +619,10 @@ void ProcessLayer(
 		uint layerNum = *mt;
 		const LayerDef &ld = sharedData.layers.layers[layerNum];
 		if (zoom<ld.minzoom || zoom>ld.maxzoom) { continue; }
+		// Whether an outline_of layer draws this layer's polygons at this zoom (see buildPolygon)
+		bool outlineSource = false;
+		for (const LayerDef &other : sharedData.layers.layers)
+			if (other.outlineOf == (int)layerNum && zoom >= other.minzoom && zoom <= other.maxzoom) { outlineSource = true; break; }
 
 		// An outline_of layer writes another layer's polygons as outlines, so
 		// prepare them with that layer's settings, to match what it draws.
@@ -620,7 +669,8 @@ void ProcessLayer(
 			ProcessObjects<Backend>(sources[i], attributeStore,
 				ooListSameLayer.first, end, sharedData, 
 				simplifyLevel, ld.simplifyAlgo, ld.repairPolygons,
-				filterArea, ld.combinePoints, zoom < ld.combineLinesBelow, zoom < ld.combinePolygonsBelow, zoom, bbox, vtLayer, attrMemo);
+				filterArea, ld.combinePoints, zoom < ld.combineLinesBelow, zoom < ld.combinePolygonsBelow, zoom, bbox, vtLayer, attrMemo,
+				outlineSource);
 		}
 	}
 	if (verbose && std::time(0)-start>3) {
