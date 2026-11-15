@@ -4,9 +4,10 @@ name: Publish relslow-patched image
 # relslow-patched branch, which hikeratlas/basemap's workflows run. The fork's
 # CI only publishes images from master.
 #
-# relslow-patched is dktue's debug/relslow (master plus open performance PRs)
-# with hikeratlas patches on top: the GeoJSON Lua function, zstd, and fixes
-# not yet upstream.
+# relslow-patched is dktue's perf/planet-3min (master plus the open performance
+# PRs, systemed/tilemaker #993-#1000 on #1001) with hikeratlas patches on top:
+# the GeoJSON Lua function, zstd, outline_of, and fixes not yet upstream. The
+# image links Lua 5.4 (the series needs 5.3/5.4) and preloads jemalloc.
 #
 # The image is multi-arch (linux/amd64 and linux/arm64). Each architecture is
 # built and smoke-tested natively on its own runner, rather than under QEMU,

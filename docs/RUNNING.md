@@ -56,16 +56,25 @@ usage but runs faster.
 * `--shard-stores`: Group temporary storage by area. Reduces RAM usage on large files (e.g.
 whole planet) but runs slower.
 
-On Linux, large builds can also run faster with a different memory allocator. tilemaker
-allocates and frees a lot of small objects, and with many threads the jemalloc allocator copes
-with that better than the default one. Install it (on Debian/Ubuntu: `sudo apt install libjemalloc2`)
-and preload it when you run tilemaker:
+On Linux, .pmtiles output is written with direct I/O (`O_DIRECT`), bypassing the page cache, which
+is considerably faster on a fast disk. Where the file system doesn't support it, tilemaker
+falls back to normal writes; setting the environment variable `TM_NO_DIRECT` forces normal writes.
 
-    LD_PRELOAD=libjemalloc.so.2 tilemaker --input planet.osm.pbf --output planet.pmtiles ...
+A few more things make large runs faster on Linux:
 
-(If the library isn't found, give its full path, e.g. `/usr/lib/x86_64-linux-gnu/libjemalloc.so.2`.)
-On a 48-core server this made the whole planet 14–17% faster at the default thread count
-and needed 7 GB less memory; a Germany extract at 32 threads was 4% faster.
+* Once the output is complete, tilemaker returns at once and leaves freeing its memory to the
+system in the background (after a planet run that takes several seconds). Use `--no-early-exit`
+to make tilemaker wait until its memory is freed.
+* tilemaker asks the kernel for transparent huge pages for its node and way stores, which cuts the
+time spent on page faults. This only has an effect when `/sys/kernel/mm/transparent_hugepage/enabled`
+is `madvise` or `always`. Set the environment variable `TM_NO_HUGEPAGES` to turn it off.
+* With many threads, the jemalloc allocator is faster than glibc's, especially with huge pages for
+its own memory too. It needs no rebuild: install it (e.g. `apt install libjemalloc2`) and run
+
+      LD_PRELOAD=libjemalloc.so.2 MALLOC_CONF=thp:always,metadata_thp:always tilemaker ...
+
+  On the planet with 96 threads, jemalloc made the run about 6% faster, and its huge-page settings
+  another 2%.
 
 You can also tell tilemaker to only look at .pbf objects with certain tags. If you're making a 
 thematic map, this allows tilemaker to skip data it won't need. Specify this in your Lua file 

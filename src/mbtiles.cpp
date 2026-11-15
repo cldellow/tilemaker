@@ -109,13 +109,11 @@ void MBTiles::saveTile(int zoom, int x, int y, string *data, bool isMerge) {
 	}
 
 	// If the lock is available, write directly to SQLite.
-	{
-		std::unique_lock<std::mutex> dbLock(m, std::try_to_lock);
-		if (dbLock.owns_lock()) {
-			insertOrReplace(zoom, x, y, *data, isMerge);
-			flushPendingStatements();
-			return;
-		}
+	if (m.try_lock()) {
+		insertOrReplace(zoom, x, y, *data, isMerge);
+		flushPendingStatements();
+		m.unlock();
+		return;
 	}
 
 	{

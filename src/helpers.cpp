@@ -256,11 +256,11 @@ void decompress_zstd(std::string& output, const char* input, size_t inputSize, s
 	}
 }
 
-std::string compress_tile(const std::string& str, TileCompression compression) {
+std::string compress_tile(const std::string& str, TileCompression compression, int level) {
 	switch (compression) {
 		case TileCompression::None:    return str;
-		case TileCompression::Gzip:    return compress_string(str, Z_DEFAULT_COMPRESSION, true);
-		case TileCompression::Deflate: return compress_string(str, Z_DEFAULT_COMPRESSION, false);
+		case TileCompression::Gzip:    return compress_string(str, level, true);
+		case TileCompression::Deflate: return compress_string(str, level, false);
 		case TileCompression::Zstd:    return compress_zstd(str);
 	}
 	throw std::runtime_error("compress_tile: unknown compression");
