@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +51,7 @@ public:
 	pmtiles::headerv3 header;
 	bool isSparse = true;
 	uint8_t tileType = pmtiles::TILETYPE_MVT;
+	int compressionLevel = 6;	// for tiles; the directories and metadata use the default
 
 	void open(std::string &filename);
 	void saveTile(int zoom, int x, int y, std::string &data);
@@ -60,7 +62,12 @@ public:
 
 private:
 	std::ofstream outputStream;
+	std::string filename;
+	std::vector<std::shared_ptr<void>> laterGarbage;	// freed with the object (see close)
 	std::vector<char> outputBuffer;	// a large stream buffer: one thread writes all tiles
+	// Tile data past the page cache (O_DIRECT), when the file system allows it - see pmtiles.cpp
+	struct DirectWriter;
+	std::unique_ptr<DirectWriter> direct;
 	uint64_t tileDataEnd = 0;	// bytes of tile data written so far (tellp() costs a flush and a seek per tile)
 	uint64_t leafStart = 0;
 	uint64_t numTilesWritten = 0;

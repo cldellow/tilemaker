@@ -56,6 +56,10 @@ usage but runs faster.
 * `--shard-stores`: Group temporary storage by area. Reduces RAM usage on large files (e.g.
 whole planet) but runs slower.
 
+On Linux, .pmtiles output is written with direct I/O (`O_DIRECT`), bypassing the page cache, which
+is considerably faster on a fast disk. Where the file system doesn't support it, tilemaker
+falls back to normal writes; setting the environment variable `TM_NO_DIRECT` forces normal writes.
+
 You can also tell tilemaker to only look at .pbf objects with certain tags. If you're making a 
 thematic map, this allows tilemaker to skip data it won't need. Specify this in your Lua file 
 like one of these three examples:
