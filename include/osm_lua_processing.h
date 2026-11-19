@@ -153,6 +153,14 @@ public:
 
 	std::vector<std::string> FindCovering(const std::string &layerName);
 	bool CoveredBy(const std::string &layerName);
+
+	// A way split by an indexed layer's polygons (e.g. parks): the metres of it
+	// inside them, and Layer() with only the part inside, or outside, them.
+	// LayerInside/LayerOutside write nothing and return false if that part is
+	// empty (so a profile must check before setting attributes).
+	double LengthInside(const std::string &shapeLayer);
+	bool LayerInside(const std::string &layerName, const std::string &shapeLayer);
+	bool LayerOutside(const std::string &layerName, const std::string &shapeLayer);
 	template <typename GeometryT> std::vector<uint> coveredQuery(const std::string &layerName, bool once, GeometryT &geom) const;
 		
 	// Returns whether it is closed polygon
@@ -619,6 +627,7 @@ private:
 		relationSubscript = -1;
 		declutterOutputs.clear();
 		lastStoredGeometryId = 0;
+		splitMemo.done = false;
 		isWay = false;
 		isRelation = false;
 		isPostScanRelation = false;
@@ -697,6 +706,20 @@ private:
 
 	NodeID lastStoredGeometryId;
 	OutputGeometryType lastStoredGeometryType;
+
+	// The current way split by a shapefile layer's polygons (LayerInside,
+	// LayerOutside, LengthInside), for one layer at a time, with the ids of
+	// the pieces once stored, so several layers can share them.
+	struct SplitMemo {
+		bool done = false;
+		std::string shapeLayer;
+		MultiLinestring inside, outside;
+		NodeID insideId = 0, outsideId = 0;
+	};
+	SplitMemo splitMemo;
+	const SplitMemo &splitBy(const std::string &shapeLayer);
+	bool layerSplit(const std::string &layerName, const std::string &shapeLayer, bool inside);
+	double multiLinestringMetres(const MultiLinestring &mls) const;
 
 	const class Config &config;
 	class LayerDefinition &layers;

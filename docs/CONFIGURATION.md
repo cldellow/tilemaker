@@ -316,6 +316,15 @@ To enable these functions, set `index` to true in your shapefile layer definitio
 
 `AreaIntersecting` returns the area of the current way's intersection with the shapefile layer. You can use this to find whether a water body is already represented in a shapefile ocean layer.
 
+A way that crosses the edge of a shapefile layer's polygons can be split there. `LayerInside(layer, shapeLayer)` writes the current way to `layer` like `Layer(layer, false)`, but only the parts of it inside `shapeLayer`'s polygons, and `LayerOutside(layer, shapeLayer)` only the rest. Each returns `false`, and writes nothing, if that part is empty: check it before calling `Attribute` or `MinZoom`, which apply to the last object written. `LengthInside(shapeLayer)` returns the metres of the way inside, e.g. to treat a sidewalk that only grazes a park as outside it:
+
+    if Intersects("parks") and not CoveredBy("parks") and LengthInside("parks") > 20 then
+        if LayerInside("path", "parks") then Attribute("in_park", "yes") end
+        if LayerOutside("path", "parks") then Attribute("in_park", "no") end
+    end
+
+The pieces keep the way's direction. Where polygons overlap, a piece is inside only once. The split is computed once per way and shared by every layer it's written to. These functions are for ways, not nodes or relations.
+
 ### Lua key/value store
 
 tilemaker has a simple key/value store accessible from Lua which you can use to bring in external data. The same store is used across all processing threads.

@@ -294,6 +294,9 @@ std::vector<std::string> rawFindIntersecting(const std::string &layerName) { if 
 bool rawIntersects(const std::string& layerName) { if (osmLuaProcessing->memoTrace.active) osmLuaProcessing->memoLuaOnly(); return osmLuaProcessing->Intersects(layerName); }
 std::vector<std::string> rawFindCovering(const std::string& layerName) { if (osmLuaProcessing->memoTrace.active) osmLuaProcessing->memoLuaOnly(); return osmLuaProcessing->FindCovering(layerName); }
 bool rawCoveredBy(const std::string& layerName) { if (osmLuaProcessing->memoTrace.active) osmLuaProcessing->memoLuaOnly(); return osmLuaProcessing->CoveredBy(layerName); }
+double rawLengthInside(const std::string& shapeLayer) { if (osmLuaProcessing->memoTrace.active) osmLuaProcessing->memoLuaOnly(); return osmLuaProcessing->LengthInside(shapeLayer); }
+bool rawLayerInside(const std::string& layerName, const std::string& shapeLayer) { if (osmLuaProcessing->memoTrace.active) osmLuaProcessing->memoLuaOnly(); return osmLuaProcessing->LayerInside(layerName, shapeLayer); }
+bool rawLayerOutside(const std::string& layerName, const std::string& shapeLayer) { if (osmLuaProcessing->memoTrace.active) osmLuaProcessing->memoLuaOnly(); return osmLuaProcessing->LayerOutside(layerName, shapeLayer); }
 bool rawIsClosed() {
 	const bool closed = osmLuaProcessing->IsClosed();
 	if (osmLuaProcessing->memoTrace.active) osmLuaProcessing->memoRead(OsmLuaProcessing::MemoNode::IsClosed, "", 0, closed ? "1" : "0");
@@ -567,6 +570,9 @@ OsmLuaProcessing::OsmLuaProcessing(
 	luaState["Intersects"] = &rawIntersects;
 	luaState["FindCovering"] = &rawFindCovering;
 	luaState["CoveredBy"] = &rawCoveredBy;
+	luaState["LengthInside"] = &rawLengthInside;
+	luaState["LayerInside"] = &rawLayerInside;
+	luaState["LayerOutside"] = &rawLayerOutside;
 	luaState["IsClosed"] = &rawIsClosed;
 	luaState["IsMultiPolygon"] = &rawIsMultiPolygon;
 	luaState["GeoJSON"] = &rawGeoJSON;
@@ -783,6 +789,103 @@ bool OsmLuaProcessing::CoveredBy(const string &layerName) {
 	else if (!isClosed && isRelation) { return !coveredQuery(layerName, true, multiLinestringCached()).empty(); }
 	else if (isRelation){ return !coveredQuery(layerName, true, multiPolygonCached()).empty(); }
 	else                { return !coveredQuery(layerName, true, polygonCached()).empty(); }
+}
+
+void reverse_project(DegPoint& p);
+
+// The current way split by an indexed layer's polygons: the pieces inside
+// any of them, and the rest. Each polygon takes its part of what's left, so
+// where polygons overlap (a park within a park) a piece is inside only once.
+// Pieces are kept in the way's direction (Boost's linear/areal overlay keeps
+// the linestring's), so one-way attributes still hold. Memoized for the way.
+const OsmLuaProcessing::SplitMemo &OsmLuaProcessing::splitBy(const string &shapeLayer) {
+	if (splitMemo.done && splitMemo.shapeLayer == shapeLayer) return splitMemo;
+	splitMemo.done = true;
+	splitMemo.shapeLayer = shapeLayer;
+	splitMemo.inside.clear();
+	splitMemo.outside.clear();
+	splitMemo.insideId = splitMemo.outsideId = 0;
+	if (!isWay || isRelation) {
+		throw std::runtime_error("LayerInside/LayerOutside/LengthInside: only for ways");
+	}
+	MultiLinestring rest;
+	rest.push_back(linestringCached());
+	Box box; geom::envelope(rest, box);
+	if (shpMemTiles.mayIntersect(shapeLayer, box)) {
+		shpMemTiles.QueryMatchingGeometries(shapeLayer, false, box,
+			[&](const RTree &rtree) {
+				vector<IndexValue> results;
+				rtree.query(geom::index::intersects(box), back_inserter(results));
+				return results;
+			},
+			[&](OutputObject const &oo) {
+				if (rest.empty()) return false;
+				const auto &mp = shpMemTiles.retrieveMultiPolygon(oo.objectID);
+				if (!geom::intersects(rest, mp)) return false;
+				MultiLinestring in, out;
+				try {
+					geom::intersection(rest, mp, in);
+					geom::difference(rest, mp, out);
+				} catch (std::exception &e) {
+					return false;
+				}
+				for (auto &l : in) splitMemo.inside.push_back(std::move(l));
+				rest = std::move(out);
+				return true;
+			}
+		);
+	}
+	splitMemo.outside = std::move(rest);
+	// Drop what touching leaves: single points, and zero-length pieces.
+	auto prune = [](MultiLinestring &mls) {
+		mls.erase(std::remove_if(mls.begin(), mls.end(), [](const Linestring &l) {
+			return l.size() < 2 || geom::length(l) == 0;
+		}), mls.end());
+	};
+	prune(splitMemo.inside);
+	prune(splitMemo.outside);
+	return splitMemo;
+}
+
+double OsmLuaProcessing::multiLinestringMetres(const MultiLinestring &mls) const {
+	double total = 0;
+	for (const Linestring &ls : mls) {
+		geom::model::linestring<DegPoint> l;
+		geom::assign(l, ls);
+		geom::for_each_point(l, reverse_project);
+		total += geom::length(l, geom::strategy::distance::haversine<float>(RadiusMeter));
+	}
+	return total;
+}
+
+double OsmLuaProcessing::LengthInside(const string &shapeLayer) {
+	return multiLinestringMetres(splitBy(shapeLayer).inside);
+}
+
+bool OsmLuaProcessing::LayerInside(const string &layerName, const string &shapeLayer) {
+	return layerSplit(layerName, shapeLayer, true);
+}
+
+bool OsmLuaProcessing::LayerOutside(const string &layerName, const string &shapeLayer) {
+	return layerSplit(layerName, shapeLayer, false);
+}
+
+// Layer(), with the part of the way inside (or outside) shapeLayer's polygons,
+// as a multilinestring. Stored once per part, for every layer it's written to.
+bool OsmLuaProcessing::layerSplit(const string &layerName, const string &shapeLayer, bool inside) {
+	const auto layer = layers.layerMap.find(layerName);
+	if (layer == layers.layerMap.end()) {
+		throw out_of_range("ERROR: LayerInside/LayerOutside: a layer named as \"" + layerName + "\" doesn't exist.");
+	}
+	const SplitMemo &m = splitBy(shapeLayer);
+	const MultiLinestring &part = inside ? m.inside : m.outside;
+	if (part.empty()) return false;
+	NodeID &id = inside ? splitMemo.insideId : splitMemo.outsideId;
+	if (id == 0) id = osmMemTiles.storeMultiLinestring(part);
+	outputKeys.clear();
+	OutputObject oo(MULTILINESTRING_, layer->second, id, 0, layers.layers[layer->second].minzoom);
+	outputs.push_back(std::make_pair(std::move(oo), AttributeSet()));
+	return true;
 }
 
 double OsmLuaProcessing::AreaIntersecting(const string &layerName) {
