@@ -1,0 +1,69 @@
+{
+  "layers": {
+    "parks": {
+      "minzoom": 15,
+      "maxzoom": 15,
+      "source": "../data/parks.geojsonl",
+      "index": true
+    },
+    "city_parks": {
+      "minzoom": 15,
+      "maxzoom": 15,
+      "source": "../data/city-parks.geojsonl",
+      "index": true
+    },
+    "parks_near": {
+      "minzoom": 15,
+      "maxzoom": 15,
+      "source": "../data/parks-near.geojsonl",
+      "index": true
+    },
+    "campgrounds": {
+      "minzoom": 15,
+      "maxzoom": 15,
+      "source": "../data/campgrounds.geojsonl",
+      "index": true
+    },
+    "trail_areas": {
+      "minzoom": 15,
+      "maxzoom": 15,
+      "source": "../data/trail-areas.geojsonl",
+      "index": true
+    },
+    "urban_lots": {
+      "minzoom": 15,
+      "maxzoom": 15,
+      "source": "../data/urban-lots.geojsonl",
+      "index": true
+    },
+    "poi": {
+      "zindex": 86,
+      "minzoom": 8,
+      "maxzoom": 14
+    }
+  },
+  "settings": {
+    "minzoom": 0,
+    "maxzoom": 14,
+    "basezoom": 14,
+    "compress": "gzip",
+    "include_ids": false,
+    "combine_below": 14,
+    "name": "Shortbread",
+    "version": "1.0",
+    "description": "Tile config for a simple vector tiles schema",
+    "filemetadata": {
+      "tilejson": "2.0.0",
+      "scheme": "xyz",
+      "type": "baselayer",
+      "format": "pbf",
+      "tiles": [
+        "https://example.com/liechtenstein/{z}/{x}/{y}.pbf"
+      ]
+    },
+    "metadata": {
+      "author": "OpenStreetMap contributors, Geofabrik GmbH",
+      "license": "Open Database License 1.0"
+    }
+  }
+}

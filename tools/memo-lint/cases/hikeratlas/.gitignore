@@ -1,0 +1,4 @@
+data/
+slices/*-off.*
+slices/*-lint.*
+variants/

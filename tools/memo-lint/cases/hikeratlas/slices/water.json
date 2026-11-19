@@ -1,0 +1,85 @@
+{
+  "layers": {
+    "water_poly": {
+      "zindex": 20,
+      "minzoom": 0,
+      "maxzoom": 14,
+      "simplify_below": 12,
+      "simplify_level": 0.0002,
+      "simplify_algorithm": "visvalingam"
+    },
+    "water_poly_river": {
+      "minzoom": 0,
+      "maxzoom": 14,
+      "simplify_below": 12,
+      "simplify_level": 0.0002,
+      "write_to": "water_poly"
+    },
+    "water_line": {
+      "zindex": 21,
+      "minzoom": 0,
+      "maxzoom": 14,
+      "simplify_below": 12,
+      "simplify_level": 0.0002
+    },
+    "water_poly_name": {
+      "zindex": 86,
+      "minzoom": 0,
+      "maxzoom": 14,
+      "simplify_below": 12,
+      "simplify_level": 0.0002
+    },
+    "water_line_name": {
+      "zindex": 87,
+      "minzoom": 0,
+      "maxzoom": 14,
+      "simplify_below": 12,
+      "simplify_level": 0.0002
+    },
+    "water_barrier": {
+      "zindex": 22,
+      "minzoom": 12,
+      "maxzoom": 14
+    },
+    "lake_centerline": {
+      "zindex": 120,
+      "minzoom": 6,
+      "maxzoom": 14,
+      "source": "../data/lake-centerlines.geojsonl",
+      "source_columns": [
+        "name"
+      ],
+      "simplify_below": 12,
+      "simplify_level": 0.0002
+    },
+    "water_barrier_name": {
+      "zindex": 88,
+      "minzoom": 12,
+      "maxzoom": 14
+    }
+  },
+  "settings": {
+    "minzoom": 0,
+    "maxzoom": 14,
+    "basezoom": 14,
+    "compress": "gzip",
+    "include_ids": false,
+    "combine_below": 14,
+    "name": "Shortbread",
+    "version": "1.0",
+    "description": "Tile config for a simple vector tiles schema",
+    "filemetadata": {
+      "tilejson": "2.0.0",
+      "scheme": "xyz",
+      "type": "baselayer",
+      "format": "pbf",
+      "tiles": [
+        "https://example.com/liechtenstein/{z}/{x}/{y}.pbf"
+      ]
+    },
+    "metadata": {
+      "author": "OpenStreetMap contributors, Geofabrik GmbH",
+      "license": "Open Database License 1.0"
+    }
+  }
+}

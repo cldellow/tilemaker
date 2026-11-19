@@ -259,7 +259,8 @@ class Analyzer:
         self.funcs_by_line = {}
         for node in luaast.walk(self.tree):
             if isinstance(node, (N.Function, N.LocalFunction, N.AnonymousFunction, N.Method)):
-                self.funcs_by_line.setdefault(node.line, node)
+                self.funcs_by_line.setdefault(('=profile', node.line), node)
+        self.parsed_sources = {'=profile'}
         self._load()
         self.reset_events()
         # persistent state, across all entries
@@ -286,7 +287,7 @@ class Analyzer:
               if ml_api[f] then return "api", ml_api[f] end
               if ml_builtin[f] then return "builtin", ml_builtin[f] end
               local i = debug.getinfo(f, "S")
-              if i.what == "Lua" then return "lua", i.linedefined end
+              if i.what == "Lua" then return "lua", i.linedefined, i.source end
               return "other", ""
             end
             function ml_upvalues(f)
@@ -328,9 +329,10 @@ class Analyzer:
             tid = self.G.ml_tid(x)
             return V(table=x, tid=tid)
         if t == 'function':
-            kind, info = self.G.ml_classify(x)
+            r = self.G.ml_classify(x)
+            kind, info = r[0], r[1]
             if kind == 'lua':
-                return V(func=('lua', info, x))
+                return V(func=('lua', (r[2], info), x))
             return V(func=(kind, info))
         return V.top(nonnil=True)
 
@@ -429,11 +431,26 @@ class Analyzer:
         self.call_lua(fv, [], st, line=0, depth=0)
         return True
 
+    def function_node(self, source, line):
+        """The AST of a Lua function, parsing the module it was loaded from (require) if need be."""
+        if source not in self.parsed_sources:
+            self.parsed_sources.add(source)
+            if source.startswith('@'):
+                try:
+                    with open(source[1:], encoding='utf-8') as f:
+                        tree = luaast.parse(f.read())
+                    for node in luaast.walk(tree):
+                        if isinstance(node, (N.Function, N.LocalFunction, N.AnonymousFunction, N.Method)):
+                            self.funcs_by_line.setdefault((source, node.line), node)
+                except Exception as e:  # noqa: BLE001
+                    self.notes['unsupported'].add((f'module {source[1:]} could not be parsed: {e}', None))
+        return self.funcs_by_line.get((source, line))
+
     def call_lua(self, fv, args, st, line, depth):
         """Inline a profile function. Returns (state after, [V results])."""
-        fnode = self.funcs_by_line.get(fv.func[1])
+        fnode = self.function_node(*fv.func[1])
         if fnode is None or depth > MAX_DEPTH:
-            self.notes['unanalysed-call'].add((f'function at line {fv.func[1]}', line))
+            self.notes['unanalysed-call'].add((f'function at {fv.func[1][0].lstrip("@=")}:{fv.func[1][1]}', line))
             for a in args:
                 self.use(a, 'other', 'passed to a function memo-lint could not follow', line)
             return st, [V.top()]

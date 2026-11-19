@@ -1,0 +1,225 @@
+qrank = nil
+
+local function Attr(k, v) if v ~= '' then Attribute(k, v) end end
+
+-- The first of a tag's ;-separated values, trimmed.
+local function first(v)
+	return (string.match(v, '^%s*([^;]-)%s*;') or string.match(v, '^%s*(.-)%s*$'))
+end
+
+-- The park's official website (website, contact:website or url), for the
+-- website's park panel (hikeratlas/website#72): an http(s) URL, or a bare
+-- host ("www.ontarioparks.ca") taken as https. Anything else is dropped.
+local function park_website()
+	for _, key in ipairs({'website', 'contact:website', 'url'}) do
+		local v = first(Find(key))
+		if string.match(v, '^[Hh][Tt][Tt][Pp][Ss]?://[^%s]+$') then return v end
+		if string.match(v, '^[%w][%w.-]*%.%a%a+[^%s]*$') and not string.find(v, '@', 1, true) then
+			return 'https://' .. v
+		end
+	end
+	return ''
+end
+
+
+-- Heritage districts aren't parks: e.g. Vancouver's First Shaughnessy Heritage
+-- Conservation Area (relation/12804067) is a residential neighbourhood mapped
+-- as boundary=protected_area, so its sidewalks drew as hiking trails. Matched
+-- by name: protect_class 22 (cultural) would also drop real parks that are
+-- historic sites, e.g. Stanley Park, and a bare "Heritage" would drop Stein
+-- Valley Nlaka'pamux Heritage Park.
+function is_heritage_district()
+	local name = Find('name')
+	return string.find(name, 'Heritage Conservation', 1, true) ~= nil
+		or string.find(name, 'Historic District', 1, true) ~= nil
+end
+
+function init_function()
+	qrank = require 'qrank' 
+	qrank.init()
+end
+
+function exit_function()
+	qrank.close()
+end
+
+way_keys = {'boundary=protected_area', 'boundary=national_park', 'leisure=nature_reserve', 'leisure=park', 'landuse=recreation_ground'}
+-- Some parks are mapped as a single node, e.g. Ivanhoe Lake Provincial Park:
+-- https://www.openstreetmap.org/node/3046004352
+node_keys = way_keys
+
+-- A park mapped as a node has no area to fill or outline, so it only gets a
+-- label, from the zoom the smallest park areas get theirs.
+function node_function()
+	maybe_emit(true)
+end
+
+function get_short_name(x)
+	x = string.gsub(x, 'National Park', 'NP')
+	x = string.gsub(x, 'State Park', 'SP')
+	x = string.gsub(x, 'Provincial Park', 'PP')
+	x = string.gsub(x, 'National Forest', 'NF')
+
+	return x
+end
+
+function maybe_emit(is_node)
+	-- If you don't have a name, you're probably not well-enough detailed
+	-- to be included, eg https://www.openstreetmap.org/way/989294968
+	-- is a broken item.
+	local name = Find('name')
+	if name == '' then return end
+
+	local protection_title = Find('protection_title')
+	-- Highways aren't areas of natural beauty: https://www.openstreetmap.org/relation/166587
+	-- (The Blue Ridge Parkway _is_ gorgeous! It's just jarring to see it prominently
+	-- highlighted on a hiking-focused map.)
+	if protection_title == 'National Parkway' then return end
+
+	local wikidata = Find('wikidata')
+	local rank = qrank.get(wikidata)
+	local short_name = get_short_name(name)
+	local boundary = Find('boundary')
+	local leisure = Find('leisure')
+	local landuse = Find('landuse')
+	if boundary ~= 'national_park' and boundary ~= 'protected_area' and leisure ~= 'nature_reserve' and leisure ~= 'park' and landuse ~= 'recreation_ground' then return end
+	if is_heritage_district() then return end
+
+	local area = is_node and 0 or math.ceil(Area())
+
+	-- For now, don't draw maritime parks. In the future, maybe we just draw a
+	-- dark blue border around them, but don't fill them?
+	--
+	-- Examples:
+	-- https://www.openstreetmap.org/relation/9064770
+	-- https://www.openstreetmap.org/way/268507821
+	--
+	-- Their areas go in marine_park, which no style draws, for
+	-- hikeratlas/routes: a marine park's shore can be part of a land park's
+	-- (Fathom Five's, around Bruce Peninsula's visitor centre, routes' PART_OF).
+	if Find('maritime') == 'yes' or
+		string.find(name, 'Estuary ', 1, true) ~= nil or
+		string.find(name, 'Aquatic ', 1, true) ~= nil or
+		string.find(name, 'Marine ', 1, true) ~= nil or
+		string.find(name, 'River Delta', 1, true) ~= nil then
+		if not is_node then
+			Layer('marine_park', true)
+			MinZoom(8)
+			Attr('name', name)
+			Attr('boundary', boundary)
+			Attr('leisure', leisure)
+			Attr('area', area)
+			Attr('osm_id', Id())
+		end
+		return
+	end
+
+	mz = 0
+
+	-- A node (area 0) ends up at z10, like the smallest park areas.
+	if area < 200000000 then
+		mz = 5
+	end
+	if area < 160000000 then
+		mz = 7
+	end
+	if area < 36000000 then
+		mz = 8
+	end
+	if area < 450000 then
+		mz = 10
+	end
+
+
+	if is_node then
+		Layer('park_name', false)
+		MinZoom(mz)
+		AttributeNumeric('rank', rank)
+		Attr('name', name)
+		Attr('short_name', short_name)
+		Attr('boundary', boundary)
+		Attr('leisure', leisure)
+		Attr('landuse', landuse)
+		Attr('wikidata', wikidata)
+		Attr('osm_id', Id())
+		Attr('website', park_website())
+		Attr('operator', first(Find('operator')))
+		return
+	end
+
+	Layer('park', true)
+	MinZoom(mz)
+	Attr('name', name)
+	AttributeNumeric('rank', rank)
+	Attr('short_name', short_name)
+	Attr('boundary', boundary)
+	Attr('leisure', leisure)
+	Attr('landuse', landuse)
+	Attr('wikidata', wikidata)
+	Attr('area', area)
+	Attr('osm_id', Id())
+	-- hikeratlas/routes skips parks closed to the public, e.g. Vancouver's
+	-- watersheds (access=private).
+	Attr('access', Find('access'))
+
+	if string.find(name, 'Land Use Zone', 1, true) ~= nil then
+		mz = 10
+	end
+	-- The label also carries the park's website and operator (not the
+	-- area, which repeats in every tile it crosses): the website's park
+	-- panel reads them from it, and hikeratlas/routes from the z8 labels.
+	LayerAsCentroid('park_name')
+	MinZoom(mz)
+	AttributeNumeric('rank', rank)
+	Attr('name', name)
+	Attr('short_name', short_name)
+	Attr('boundary', boundary)
+	Attr('leisure', leisure)
+	Attr('landuse', landuse)
+	Attr('wikidata', wikidata)
+	Attr('osm_id', Id())
+	Attr('website', park_website())
+	Attr('operator', first(Find('operator')))
+end
+
+function way_function()
+	local boundary
+	local leisure
+
+	-- If the way is only being included due to a relation, do nothing.
+	while true do
+		local rel = NextRelation()
+		if not rel then break end
+
+		boundary = FindInRelation('boundary')
+		leisure = FindInRelation('leisure')
+		landuse = FindInRelation('landuse')
+		if boundary == 'national_park' or boundary == 'protected_area' or leisure == 'nature_reserve' or leisure == 'park' or landuse == 'recreation_ground' then
+			return
+		end
+	end
+
+	maybe_emit()
+end
+
+function relation_scan_function()
+  local boundary = Find('boundary')
+  local leisure = Find('leisure')
+  local landuse = Find('landuse')
+
+	if boundary == 'national_park' or boundary == 'protected_area' or leisure == 'nature_reserve' or landuse == 'recreation_ground' then
+		Accept()
+	end
+end
+
+function relation_function()
+  local id = Id()
+
+	-- Ignore some broken relations.
+	if id == '11538224' then return end
+	if id == '12180623' then return end
+	if id == '6495680' then return end
+	if id == '6535292' then return end -- Tongass National Park
+
+	maybe_emit()
+end
