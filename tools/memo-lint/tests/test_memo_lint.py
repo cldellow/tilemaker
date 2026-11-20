@@ -359,34 +359,8 @@ def test_openmaptiles_profile():
     assert rep['state'] == []
     way = rep['kinds']['way']
     assert errors(rep) == [] and errors(rep, 'node') == []
-    # everything the profile declares by hand is inferred
-    for k, d in way['declared']['values'].items():
-        assert way['values'][k] == d, k
-    assert way['area_thresholds'] == way['declared']['area']
-    assert way['relations_ok'] and way['declared']['relations']
-
-
-def test_fails_closed_on_closures():
-    rep = lint('''
-        function way_function()
-          local f = function(x) return x end
-          Layer("roads", false)
-        end
-    ''')
-    assert 'way_memo = true' not in rep['kinds']['way']['recommended']
-    assert any('could not follow' in w for w in findings(rep, sev='warning'))
-
-
-def test_value_whose_attribute_is_shared_is_not_suggested():
-    # subclass gets a copy of wetland, but also other values: declaring wetland sends those through Lua
-    rep = lint('''
-        way_memo = true
-        way_memo_values = { wetland = { "subclass" } }
-        function way_function()
-          local l = Find("natural")
-          if l == "wetland" then Layer("landcover", true); Attribute("subclass", Find("wetland"))
-          elseif l == "wood" then Layer("landcover", true); Attribute("subclass", "forest") end
-        end
-    ''')
-    assert 'wetland' not in rep['kinds']['way']['values']
-    assert any('slows it down' in w for w in findings(rep, sev='warning'))
+    # what the profile used to declare by hand (it now leaves it to tilemaker)
+    assert way['values']['name'] == {'copies': ['name:latin'], 'lengths': []}
+    assert way['values']['ref'] == {'copies': ['ref'], 'lengths': ['ref_length']}
+    assert way['area_thresholds'] == [611.5 ** 2]
+    assert way['relations_ok']

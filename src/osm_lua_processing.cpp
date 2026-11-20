@@ -11,6 +11,7 @@
 #include "tag_map.h"
 #include "node_store.h"
 #include "polylabel.h"
+#include "memo_analysis_lua.h"
 #include <signal.h>
 
 using namespace std;
@@ -348,6 +349,177 @@ std::string rawGetData(const std::string &key) { if (osmLuaProcessing->memoTrace
 static std::unordered_map<std::string, std::vector<std::string>> readMemoValueTags(lua_State *L, const char *global, std::unordered_map<std::string, std::string> &lengths);
 static std::vector<double> readMemoArea(lua_State *L, const char *global);
 
+// ----	The memo's settings derived from the profile (src/memo_analysis)
+// The analysis tells tilemaker's functions and the standard library's by identity, so it is given
+// both as they were registered: the standard library before the profile was loaded (it could
+// replace string.lower...), tilemaker's functions before init_function (it could wrap Find...).
+static const char *memoBuiltinsKey = "tilemaker.memo_builtins";
+static const char *memoApiKey = "tilemaker.memo_api";
+static const char *MEMO_BUILTINS_SNAPSHOT = R"lua(
+	local b = {}
+	for _, lib in ipairs({ "string", "math", "table", "os", "io", "utf8", "coroutine", "debug", "package" }) do
+		local t = rawget(_G, lib)
+		if type(t) == "table" then
+			for k, f in pairs(t) do if type(f) == "function" then b[f] = lib .. "." .. k end end
+		end
+	end
+	for k, f in pairs(_G) do if type(f) == "function" and not b[f] then b[f] = k end end
+	return b
+)lua";
+static const char *MEMO_API_SNAPSHOT = R"lua(
+	local a = {}
+	for _, n in ipairs({ "Find", "Holds", "Layer", "LayerAsCentroid", "Attribute", "AttributeNumeric",
+		"AttributeBoolean", "AttributeInteger", "MinZoom", "ZOrder", "Score", "ModifyId", "MinZoomByArea",
+		"IsClosed", "MercatorArea", "NextRelation", "FindInRelation", "Id", "OsmType", "AllKeys", "AllTags",
+		"HasTags", "SetTag", "FindIntersecting", "Intersects", "FindCovering", "CoveredBy", "IsMultiPolygon",
+		"Area", "Length", "Centroid", "RestartRelations", "Accept", "AreaIntersecting", "SetData", "GetData" }) do
+		local f = rawget(_G, n)
+		if f ~= nil then a[f] = n end
+	end
+	return a
+)lua";
+
+// Runs `snapshot` (Lua that returns a table) and keeps its table in the registry under `key`
+static void memoSnapshot(lua_State *L, const char *snapshot, const char *key) {
+	const int top = lua_gettop(L);
+	if (luaL_loadstring(L, snapshot) == 0 && lua_pcall(L, 0, 1, 0) == 0) lua_setfield(L, LUA_REGISTRYINDEX, key);
+	lua_settop(L, top);
+}
+
+struct MemoSettings {
+	bool enabled = false;
+	std::unordered_map<std::string, std::vector<std::string>> valueTags;
+	std::unordered_map<std::string, std::string> valueLengths;
+	std::vector<double> area;
+	bool relations = false;
+	std::string why;	// derived and off: why
+};
+struct MemoDerived {
+	bool done = false;
+	MemoSettings way, node;
+};
+static std::mutex memoDerivedMutex;
+static MemoDerived memoDerived;
+
+// Strings of the Lua array at the top of the stack
+static std::vector<std::string> luaStrings(lua_State *L) {
+	std::vector<std::string> out;
+	if (!lua_istable(L, -1)) return out;
+	for (int i = 1; ; i++) {
+		lua_rawgeti(L, -1, i);
+		if (lua_type(L, -1) != LUA_TSTRING) { lua_pop(L, 1); break; }
+		out.emplace_back(lua_tostring(L, -1));
+		lua_pop(L, 1);
+	}
+	return out;
+}
+
+// report.kinds[kind] (the table at the top of the stack) -> settings
+static MemoSettings readDerivedMemo(lua_State *L) {
+	MemoSettings m;
+	if (!lua_istable(L, -1)) { m.why = "not analysed"; return m; }
+	lua_getfield(L, -1, "enabled"); m.enabled = lua_toboolean(L, -1); lua_pop(L, 1);
+	lua_getfield(L, -1, "reasons");
+	std::vector<std::string> reasons = luaStrings(L);
+	lua_pop(L, 1);
+	if (!reasons.empty()) m.why = reasons[0];
+	lua_getfield(L, -1, "values");
+	if (lua_istable(L, -1)) {
+		lua_pushnil(L);
+		while (lua_next(L, -2)) {
+			if (lua_type(L, -2) == LUA_TSTRING) m.valueTags[lua_tostring(L, -2)] = luaStrings(L);
+			lua_pop(L, 1);
+		}
+	}
+	lua_pop(L, 1);
+	lua_getfield(L, -1, "lengths");
+	if (lua_istable(L, -1)) {
+		lua_pushnil(L);
+		while (lua_next(L, -2)) {
+			if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+				const std::string attr = lua_tostring(L, -2), tag = lua_tostring(L, -1);
+				m.valueLengths[attr] = tag;
+				// (the C++ side keeps a tag's length attribute next to its copies, as in way_memo_values)
+				m.valueTags[tag];
+			}
+			lua_pop(L, 1);
+		}
+	}
+	lua_pop(L, 1);
+	lua_getfield(L, -1, "area");
+	if (lua_istable(L, -1)) {
+		for (int i = 1; ; i++) {
+			lua_rawgeti(L, -1, i);
+			if (!lua_isnumber(L, -1)) { lua_pop(L, 1); break; }
+			m.area.push_back(lua_tonumber(L, -1));
+			lua_pop(L, 1);
+		}
+	}
+	lua_pop(L, 1);
+	lua_getfield(L, -1, "relations"); m.relations = lua_toboolean(L, -1); lua_pop(L, 1);
+	return m;
+}
+
+// Runs the analysis in L (the profile loaded, init_function run): fills `out`. On any failure the
+// memo stays off: nothing derived is trusted that wasn't proven.
+static void deriveMemoSettings(lua_State *L, MemoDerived &out) {
+	const int top = lua_gettop(L);
+	std::string src;
+	for (const char *const *p = memoAnalysisLua; *p; p++) src += *p;
+	if (luaL_loadbuffer(L, src.data(), src.size(), "=memo_analysis") != 0 || lua_pcall(L, 0, 1, 0) != 0) {
+		out.way.why = out.node.why = std::string("memo analysis failed to load: ") + (lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+		lua_settop(L, top);
+		return;
+	}
+	lua_newtable(L);
+	lua_getfield(L, LUA_REGISTRYINDEX, memoApiKey); lua_setfield(L, -2, "api");
+	lua_getfield(L, LUA_REGISTRYINDEX, memoBuiltinsKey); lua_setfield(L, -2, "builtins");
+	if (lua_pcall(L, 1, 1, 0) != 0) {
+		out.way.why = out.node.why = std::string("memo analysis failed: ") + (lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+		lua_settop(L, top);
+		return;
+	}
+	lua_getfield(L, -1, "kinds");
+	if (lua_istable(L, -1)) {
+		lua_getfield(L, -1, "way"); out.way = readDerivedMemo(L); lua_pop(L, 1);
+		lua_getfield(L, -1, "node"); out.node = readDerivedMemo(L); lua_pop(L, 1);
+	}
+	lua_settop(L, top);
+}
+
+static void printDerivedMemo(const char *function, const MemoSettings &m) {
+	std::cout << function << " memo (derived): ";
+	if (!m.enabled) { std::cout << "off: " << m.why << std::endl; return; }
+	std::cout << "on";
+	if (!m.valueTags.empty()) {
+		std::vector<std::string> tags;
+		for (const auto &t : m.valueTags) tags.push_back(t.first);
+		std::sort(tags.begin(), tags.end());
+		std::cout << "; value tags:";
+		for (const auto &t : tags) {
+			std::cout << " " << t << " (";
+			bool first = true;
+			for (const auto &a : m.valueTags.at(t)) { std::cout << (first ? "" : ", ") << a; first = false; }
+			for (const auto &l : m.valueLengths) if (l.second == t) { std::cout << (first ? "" : ", ") << l.first << " = length"; first = false; }
+			std::cout << ")";
+		}
+	}
+	if (!m.area.empty()) {
+		std::cout << "; area thresholds:";
+		for (double a : m.area) std::cout << " " << a;
+	}
+	if (m.relations) std::cout << "; relations";
+	std::cout << std::endl;
+}
+
+// way_memo = nil or "auto": derive; anything else: as declared
+static bool memoDeclared(lua_State *L, const char *global) {
+	lua_getglobal(L, global);
+	const bool declared = !lua_isnil(L, -1) && !(lua_type(L, -1) == LUA_TSTRING && std::string(lua_tostring(L, -1)) == "auto");
+	lua_pop(L, 1);
+	return declared;
+}
+
 // Memo of way_function: the processors that use it (for printMemoStats)
 static std::mutex memoInstancesMutex;
 static std::vector<OsmLuaProcessing*> memoInstances;
@@ -475,6 +647,7 @@ OsmLuaProcessing::OsmLuaProcessing(
 	// ----	Initialise Lua
 	g_luaState = &luaState;
 	luaState.setErrorHandler(lua_error_handler);
+	memoSnapshot(luaState.state(), MEMO_BUILTINS_SNAPSHOT, memoBuiltinsKey);	// before the profile can change it
 	luaState.dofile(luaFile.c_str());
 
 	osmLuaProcessing = this;
@@ -537,26 +710,74 @@ OsmLuaProcessing::OsmLuaProcessing(
 	luaState["FindInRelation"] = &rawFindInRelation;
 	luaState["SetData"] = &rawSetData;
 	luaState["GetData"] = &rawGetData;
+	memoSnapshot(L, MEMO_API_SNAPSHOT, memoApiKey);	// before init_function can wrap them
 	supportsRemappingShapefiles = !!luaState["attribute_function"];
 	supportsReadingRelations    = !!luaState["relation_scan_function"];
 	supportsPostScanRelations   = !!luaState["relation_postscan_function"];
 	supportsWritingNodes        = !!luaState["node_function"];
 	supportsWritingWays         = !!luaState["way_function"];
 	supportsWritingRelations    = !!luaState["relation_function"];
-	memoEnabled                 = !!luaState["way_memo"];
-	if (memoEnabled) {
-		memoValueTags = readMemoValueTags(luaState.state(), "way_memo_values", memoValueLengths);
-		memoArea = readMemoArea(luaState.state(), "way_memo_area");
-		memoRelations = !!luaState["way_memo_relations"];
+	// ---- Call init_function of Lua logic
+
+	if (!!luaState["init_function"]) {
+		luaState["init_function"](this->config.projectName, isFirst);
 	}
-	nodeMemoEnabled = supportsWritingNodes && !!luaState["node_memo"];
+
+	// ---- The memo's settings: declared, or derived from the profile (after init_function, which may
+	// set what way_function reads)
+	configureMemo();
+}
+
+void OsmLuaProcessing::configureMemo() {
+	lua_State *L = luaState.state();
+	const bool wayDeclared = memoDeclared(L, "way_memo");
+	const bool nodeDeclared = memoDeclared(L, "node_memo");
+	MemoDerived derived;
+	if (!wayDeclared || !nodeDeclared) {
+		std::lock_guard<std::mutex> lock(memoDerivedMutex);
+		if (!memoDerived.done) {
+			deriveMemoSettings(L, memoDerived);
+			memoDerived.done = true;
+			if (!wayDeclared && supportsWritingWays) printDerivedMemo("way_function", memoDerived.way);
+			if (!nodeDeclared && supportsWritingNodes) printDerivedMemo("node_function", memoDerived.node);
+		}
+		derived = memoDerived;
+	}
+
+	if (wayDeclared) {
+		memoEnabled = !!luaState["way_memo"];
+		if (memoEnabled) {
+			memoValueTags = readMemoValueTags(L, "way_memo_values", memoValueLengths);
+			memoArea = readMemoArea(L, "way_memo_area");
+			memoRelations = !!luaState["way_memo_relations"];
+		}
+	} else {
+		memoEnabled = supportsWritingWays && derived.way.enabled;
+		if (memoEnabled) {
+			memoValueTags = derived.way.valueTags;
+			memoValueLengths = derived.way.valueLengths;
+			memoArea = derived.way.area;
+			memoRelations = derived.way.relations;
+		}
+	}
 	MemoState &nodeMemo = memoSaved[MemoNodes];
-	nodeMemo.enabled = nodeMemoEnabled;
-	if (nodeMemoEnabled) {
-		nodeMemo.valueTags = readMemoValueTags(luaState.state(), "node_memo_values", nodeMemo.valueLengths);
-		nodeMemo.area = readMemoArea(luaState.state(), "node_memo_area");
-		nodeMemo.relations = !!luaState["node_memo_relations"];
+	if (nodeDeclared) {
+		nodeMemoEnabled = supportsWritingNodes && !!luaState["node_memo"];
+		if (nodeMemoEnabled) {
+			nodeMemo.valueTags = readMemoValueTags(L, "node_memo_values", nodeMemo.valueLengths);
+			nodeMemo.area = readMemoArea(L, "node_memo_area");
+			nodeMemo.relations = !!luaState["node_memo_relations"];
+		}
+	} else {
+		nodeMemoEnabled = supportsWritingNodes && derived.node.enabled;
+		if (nodeMemoEnabled) {
+			nodeMemo.valueTags = derived.node.valueTags;
+			nodeMemo.valueLengths = derived.node.valueLengths;
+			nodeMemo.area = derived.node.area;
+			nodeMemo.relations = derived.node.relations;
+		}
 	}
+	nodeMemo.enabled = nodeMemoEnabled;
 	// Multipolygon relations run way_function: its memo, with a tree of their own
 	MemoState &relationMemo = memoSaved[MemoRelations];
 	relationMemo.enabled = memoEnabled;
@@ -567,12 +788,6 @@ OsmLuaProcessing::OsmLuaProcessing(
 	if (memoEnabled || nodeMemoEnabled) {
 		std::lock_guard<std::mutex> lock(memoInstancesMutex);
 		memoInstances.push_back(this);
-	}
-
-	// ---- Call init_function of Lua logic
-
-	if (!!luaState["init_function"]) {
-		luaState["init_function"](this->config.projectName, isFirst);
 	}
 }
 

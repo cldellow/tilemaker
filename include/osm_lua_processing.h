@@ -529,6 +529,7 @@ public:
 	}
 	void memoOp(MemoOp &&op) { memoTrace.ops.push_back(std::move(op)); }
 	void memoLuaOnly() { memoTrace.luaOnly = true; }
+	void configureMemo();	// the memo's settings: declared in the profile, or derived (src/memo_analysis)
 	void runWayFunction();	// way_function (memoForNodes: node_function) through the memo
 	void runWayFunctionInLua(bool record);
 	void memoInsert();

@@ -240,18 +240,22 @@ If your Lua file causes an error due to mistaken syntax, you can test it at the 
 
 `way_keys` is similar, but for ways. For ways, you may also wish to express the filter in terms of the tag value, or as an inversion. For example, to exclude buildings: `way_keys = {"~building"}`. To build a map only of major roads: `way_keys = {"highway=motorway", "highway=trunk", "highway=primary", "highway=secondary"}`
 
-`way_memo = true` lets tilemaker replay `way_function` instead of running it, for ways that read the same as an earlier way. This is only allowed if `way_function` is a function of what it reads with `Find`, `Holds`, `IsClosed` and `NextRelation` (no other state, such as global counters), and what it does is call tilemaker's functions (`Layer`, `Attribute`... `MinZoom`): tilemaker records which reads lead to which calls, and replays the calls for a way whose reads give the same results. Anything else (geometry queries such as `Area`, relation tags, `Id`...) makes ways with those reads run through Lua. A tag whose value is only tested for being empty and copied unchanged into some attributes can be declared in `way_memo_values`, e.g. `way_memo_values = { name = { "name:latin" } }`: ways are then replayed with their own value of the tag, instead of being told apart by it. An attribute that is set to the length of the value (in bytes, as Lua's `#value` or `value:len()`) is declared as `attribute = "length"`, e.g. `way_memo_values = { ref = { "ref", ref_length = "length" } }`.
+tilemaker replays `way_function` instead of running it for ways that read the same as an earlier way (the *memo*): it records which reads (`Find`, `Holds`, `IsClosed`, `NextRelation`...) lead to which calls of its functions (`Layer`, `Attribute`... `MinZoom`), and replays the calls for a way whose reads give the same results. Ways whose path uses anything else (geometry queries such as `Area`, `Intersects`, `Id`...) run through Lua. `node_function` has a memo of its own, and so do multipolygon relations.
 
-Two more declarations let the memo replay ways that use some of the other functions:
+This is only right if `way_function` is a function of what it reads: no state carried from one way to the next (a global counter, a cache table), no side effects (`print`, files). tilemaker checks this itself when it starts: it analyses the profile's source, with the configuration it has once `init_function` has run, and prints what it found:
 
-* `way_memo_area = { 1000, 5000 }`: `way_function` uses `MercatorArea()` only to compare it (`<`, `<=`, `>`, `>=`, `==`, `~=`) with these numbers. The memo then tells ways apart by the results of these comparisons, not by the area (e.g. `if MercatorArea() < 1000 then MinZoom(8) else MinZoomByArea(0, thresholds) end`; `MinZoomByArea` needs no declaration, it is worked out for each way).
-* `way_memo_relations = true`: `way_function` uses the relation id `NextRelation()` returns only to test whether there is one (`if not rel then break end`), and reads the relations' tags only with `FindInRelation` (no `RestartRelations`). The memo then tells ways apart by the roles and the relation tags read.
+    way_function memo (derived): on; value tags: addr:housenumber (housenumber) name (name:latin) ref (ref, ref_length = length); area thresholds: 373932; relations
+    node_function memo (derived): off: state is carried from one object to the next: global seen (written at node_function line 12, read at node_function line 10)
 
-As with `way_memo_values`, tilemaker can't check these promises: if `way_function` does more with the area or the relations, ways are replayed with the wrong calls.
+Besides turning the memo on or off, the analysis works out:
 
-Multipolygon relations, which also run `way_function`, are replayed the same way (with a record of their own, apart from that of the ways): the promises above are about `way_function`, so they hold for them too. For a multipolygon, `NextRelation` and `FindInRelation` are about the relations it is a member of.
+* *value tags*: tags whose value is only tested for being empty and copied unchanged into some attributes (or whose length is): ways are replayed with their own value instead of being told apart by it, which matters for tags such as `name` or `addr:housenumber`;
+* *area thresholds*: if `MercatorArea()` is only compared with constants, the memo tells ways apart by the results of these comparisons rather than by the area (`MinZoomByArea` needs nothing, it is worked out for each way);
+* *relations*: if the relation `NextRelation()` returns is only tested for being there, and the relations' tags are read only with `FindInRelation`, the memo tells ways apart by the roles and tags read.
 
-`node_memo = true` and `node_memo_values`, `node_memo_area`, `node_memo_relations` do the same for `node_function` (with its own record).
+Whatever the analysis can't follow (a function made while processing an object, `goto`, a table with a metatable...) it doesn't prove, and the memo of that function stays off: the profile runs as it would without it.
+
+To turn the memo off, set `way_memo = false` (or `node_memo = false`). Declaring the settings yourself replaces the analysis for that function: `way_memo = true` with `way_memo_values = { name = { "name:latin" }, ref = { "ref", ref_length = "length" } }`, `way_memo_area = { 1000, 5000 }` and `way_memo_relations = true`. tilemaker can't check declared settings: if `way_function` does more with these values than they promise, ways are replayed with the wrong calls.
 
 `init_function(name, is_first)` and `exit_function` are called at the start and end of processing (once per thread). You can use this to output statistics or even to read a small amount of external data. `is_first` will be true only the first time `init_function` is called.
 

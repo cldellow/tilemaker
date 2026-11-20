@@ -21,17 +21,8 @@ default_language_attribute = "name_int"
 additional_languages = { }
 --------
 
--- way_function only reads tags (and IsClosed/NextRelation) and calls tilemaker's functions: tilemaker may replay it
-way_memo = true
--- Tag values way_function only tests for being empty and copies unchanged into these attributes:
--- the memo replays such ways with each way's own value
--- (ref: also its length, into ref_length)
-way_memo_values = { name = { "name:latin" }, ["addr:housenumber"] = { "housenumber" }, ref = { "ref", ref_length = "length" } }
--- way_function uses NextRelation() only to test for a relation, and the relations' tags only through FindInRelation
-way_memo_relations = true
--- node_function, likewise (the same tags: node_function only tests them for being empty and copies them unchanged)
-node_memo = true
-node_memo_values = { name = { "name:latin" }, ["addr:housenumber"] = { "housenumber" } }
+-- way_function and node_function only read tags and call tilemaker's functions: tilemaker works out
+-- from this file how to replay them (see way_memo in CONFIGURATION.md), so there is nothing to declare.
 
 -- Enter/exit Tilemaker
 function init_function(name,is_first)
@@ -80,8 +71,6 @@ local ZRES12SQ = ZRES12^2
 local ZRES13SQ = ZRES13^2
 -- Area thresholds for zoom 1, 2... 13 (see SetMinZoomByAreaWithLimit)
 local ZRESSQ = { ZRES0SQ, ZRES1SQ, ZRES2SQ, ZRES3SQ, ZRES4SQ, ZRES5SQ, ZRES6SQ, ZRES7SQ, ZRES8SQ, ZRES9SQ, ZRES10SQ, ZRES11SQ, ZRES12SQ }
--- way_function compares MercatorArea() only with these (see way_memo)
-way_memo_area = { ZRES8SQ }
 
 -- The height of one floor, in meters
 BUILDING_FLOOR_HEIGHT = 3.66
