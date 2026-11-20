@@ -178,13 +178,17 @@ struct PrecheckBox {
 };
 struct PrecheckScratch {
 	std::vector<PrecheckSeg> segs;
-	std::vector<PrecheckBox> boxes, holeBoxes;
+	std::vector<PrecheckBox> boxes;
 	std::vector<std::pair<uint32_t, uint32_t>> pairs;
+	std::vector<uint32_t> bandStart, bandFill, bandSegs, crossed;
 	void trim() {
 		if (segs.capacity() > kPrecheckRetained) std::vector<PrecheckSeg>().swap(segs);
 		if (boxes.capacity() > kPrecheckRetained) std::vector<PrecheckBox>().swap(boxes);
-		if (holeBoxes.capacity() > kPrecheckRetained) std::vector<PrecheckBox>().swap(holeBoxes);
 		if (pairs.capacity() > kPrecheckRetained) std::vector<std::pair<uint32_t, uint32_t>>().swap(pairs);
+		if (bandStart.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(bandStart);
+		if (bandFill.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(bandFill);
+		if (bandSegs.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(bandSegs);
+		if (crossed.capacity() > kPrecheckRetained) std::vector<uint32_t>().swap(crossed);
 	}
 };
 thread_local PrecheckScratch precheckScratch;
@@ -331,20 +335,27 @@ bool segmentsClear(std::vector<PrecheckSeg> &segs, double tol) {
 	return true;
 }
 
+// Whether the ray from h to +x crosses segment a->b: 1 = yes, -1 = no, 0 = unsure.
+// Vertices are classed as above (y > hy) or not with exact comparisons (the
+// half-open rule), so a ray through a vertex is counted consistently and the
+// crossing parity is exact; only the side of h is decided with a tolerance.
+inline int rayClearlyCrosses(const Point &h, const Point &a, const Point &b, double tol) {
+	const double hx = h.x(), hy = h.y();
+	if ((a.y() > hy) == (b.y() > hy)) return -1;
+	if (std::max(a.x(), b.x()) < hx) return -1;
+	if (std::min(a.x(), b.x()) > hx) return 1;
+	const int o = clearOrient(a, b, h, tol);
+	if (o == 0) return 0;
+	return (b.y() > a.y()) == (o > 0) ? 1 : -1;
+}
+
 // Crossing-number test: 1 = h clearly inside r, -1 = clearly outside, 0 = unsure.
 int pointClearlyInRing(const Point &h, const Ring &r, double tol) {
 	bool inside = false;
-	const double hx = h.x(), hy = h.y();
 	for (std::size_t i = 0; i + 1 < r.size(); i++) {
-		const Point &a = r[i], &b = r[i + 1];
-		if ((a.y() > hy + tol && b.y() > hy + tol) || (a.y() < hy - tol && b.y() < hy - tol)) continue;
-		if (std::fabs(a.y() - hy) <= tol || std::fabs(b.y() - hy) <= tol) return 0;
-		// a and b are clearly on opposite sides of the horizontal line through h
-		if (std::max(a.x(), b.x()) < hx - tol) continue;
-		if (std::min(a.x(), b.x()) > hx + tol) { inside = !inside; continue; }
-		const int o = clearOrient(a, b, h, tol);
-		if (o == 0) return 0;
-		if ((b.y() > a.y()) == (o > 0)) inside = !inside; // the ray to +x crosses a->b
+		const int c = rayClearlyCrosses(h, r[i], r[i + 1], tol);
+		if (c == 0) return 0;
+		if (c > 0) inside = !inside;
 	}
 	return inside ? 1 : -1;
 }
@@ -360,12 +371,91 @@ int ringClearlyInRing(const Ring &inner, const Ring &r, double tol) {
 	return 0;
 }
 
+// Holes lie inside the outer ring (ring 0) and outside each other. `segs` holds the
+// segments of all rings of p, known not to touch. They are bucketed into horizontal
+// bands, so that a ray from a vertex of each hole is tested against the segments of
+// that vertex's band only, counting crossings per ring (odd = inside that ring).
+bool holesClearlyPlaced(const Polygon &p, PrecheckScratch &scratch, double tol) {
+	const auto &inners = p.inners();
+	const std::vector<PrecheckSeg> &segs = scratch.segs;
+	if (inners.empty()) return true;
+	if (segs.size() >= std::numeric_limits<uint32_t>::max()) return false;
+
+	double minY = std::numeric_limits<double>::infinity(), maxY = -minY;
+	for (const PrecheckSeg &s : segs) { minY = std::min(minY, s.minY); maxY = std::max(maxY, s.maxY); }
+	minY -= tol; maxY += tol;
+	// About 4 segments per band; fewer bands while tall segments would make the index much bigger than segs
+	std::size_t bands = std::max<std::size_t>(1, segs.size() / 4);
+	double scale = 0;
+	auto bandOf = [&](double y) {
+		const double b = (y - minY) * scale;
+		return b <= 0 ? std::size_t(0) : std::min(bands - 1, static_cast<std::size_t>(b));
+	};
+	std::size_t entries;
+	for (;;) {
+		scale = bands / (maxY - minY);
+		entries = 0;
+		for (const PrecheckSeg &s : segs) entries += bandOf(s.maxY + tol) - bandOf(s.minY - tol) + 1;
+		if (entries <= 4 * segs.size() || bands == 1) break;
+		bands = (bands + 1) / 2;
+	}
+	if (entries >= std::numeric_limits<uint32_t>::max()) return false;
+
+	// Segments of band b: bandSegs[bandStart[b] .. bandStart[b+1])
+	std::vector<uint32_t> &start = scratch.bandStart, &fill = scratch.bandFill, &items = scratch.bandSegs;
+	start.assign(bands + 1, 0);
+	for (const PrecheckSeg &s : segs)
+		for (std::size_t b = bandOf(s.minY - tol), hi = bandOf(s.maxY + tol); b <= hi; b++) start[b + 1]++;
+	for (std::size_t b = 0; b < bands; b++) start[b + 1] += start[b];
+	fill.assign(start.begin(), start.end() - 1);
+	items.resize(entries);
+	for (std::size_t k = 0; k < segs.size(); k++)
+		for (std::size_t b = bandOf(segs[k].minY - tol), hi = bandOf(segs[k].maxY + tol); b <= hi; b++)
+			items[fill[b]++] = static_cast<uint32_t>(k);
+
+	// 1 = h inside the outer ring and no other hole, -1 = not, 0 = unsure
+	std::vector<uint32_t> &crossed = scratch.crossed;
+	auto locate = [&](const Point &h, uint32_t ownRing) {
+		crossed.clear();
+		const std::size_t b = bandOf(h.y());
+		for (uint32_t k = start[b]; k < start[b + 1]; k++) {
+			const PrecheckSeg &s = segs[items[k]];
+			if (s.ring == ownRing) continue;
+			const int c = rayClearlyCrosses(h, s.a[0], s.a[1], tol);
+			if (c == 0) return 0;
+			if (c > 0) crossed.push_back(s.ring);
+		}
+		std::sort(crossed.begin(), crossed.end());
+		bool inOuter = false;
+		for (std::size_t i = 0; i < crossed.size(); ) {
+			std::size_t j = i;
+			while (j < crossed.size() && crossed[j] == crossed[i]) j++;
+			if ((j - i) % 2 == 1) {
+				if (crossed[i] != 0) return -1; // inside another hole
+				inOuter = true;
+			}
+			i = j;
+		}
+		return inOuter ? 1 : -1;
+	};
+
+	// A ring known not to touch the others lies wherever any of its vertices does
+	for (std::size_t i = 0; i < inners.size(); i++) {
+		const Ring &hole = inners[i];
+		const std::size_t m = hole.size() - 1;
+		const std::size_t tries = std::min<std::size_t>(m, 8);
+		int loc = 0;
+		for (std::size_t k = 0; k < tries && loc == 0; k++)
+			loc = locate(hole[k * m / tries], static_cast<uint32_t>(i + 1));
+		if (loc != 1) return false;
+	}
+	return true;
+}
+
 bool polygonClear(const Polygon &p, PrecheckScratch &scratch, PrecheckBox &outerBox) {
 	const Ring &outer = p.outer();
 	const auto &inners = p.inners();
 	if (inners.size() >= std::numeric_limits<uint32_t>::max()) return false;
-	// Every hole is located by walking the outer ring
-	if (inners.size() * outer.size() > kPrecheckMaxWork) return false;
 	double maxAbs = 0;
 	if (!ringFinite(outer, maxAbs)) return false;
 	for (const auto &inner : inners)
@@ -374,29 +464,16 @@ bool polygonClear(const Polygon &p, PrecheckScratch &scratch, PrecheckBox &outer
 
 	std::vector<PrecheckSeg> &segs = scratch.segs;
 	segs.clear();
-	std::vector<PrecheckBox> &holeBoxes = scratch.holeBoxes;
-	holeBoxes.resize(inners.size());
 	if (!ringClear(outer, false, tol, 0, segs, outerBox)) return false;
-	for (std::size_t i = 0; i < inners.size(); i++) {
-		if (!ringClear(inners[i], true, tol, static_cast<uint32_t>(i + 1), segs, holeBoxes[i])) return false;
-		holeBoxes[i].id = static_cast<uint32_t>(i);
-	}
+	PrecheckBox holeBox;
+	for (std::size_t i = 0; i < inners.size(); i++)
+		if (!ringClear(inners[i], true, tol, static_cast<uint32_t>(i + 1), segs, holeBox)) return false;
 
 	// No two rings touch, and no ring touches itself.
 	if (!segmentsClear(segs, tol)) return false;
 
 	// Holes lie inside the outer ring and are not nested in each other.
-	for (std::size_t i = 0; i < inners.size(); i++) {
-		if (boxesApart(holeBoxes[i], outerBox, tol)) return false;
-		if (ringClearlyInRing(inners[i], outer, tol) != 1) return false;
-	}
-	std::size_t work = 0;
-	return forOverlappingBoxes(holeBoxes, tol, [&](uint32_t i, uint32_t j) {
-		work += inners[i].size() + inners[j].size();
-		return work <= kPrecheckMaxWork &&
-		       ringClearlyInRing(inners[i], inners[j], tol) == -1 &&
-		       ringClearlyInRing(inners[j], inners[i], tol) == -1;
-	});
+	return holesClearlyPlaced(p, scratch, tol);
 }
 
 // a's outer ring, known not to touch any ring of b, lies outside b's interior:
@@ -839,6 +916,11 @@ struct RectClipper {
 	bool inside(const Point &p) const {
 		return p.x() >= x0 && p.x() <= x1 && p.y() >= y0 && p.y() <= y1;
 	}
+	// Both end points beyond the same edge: the segment can't reach the box
+	bool beyondOneEdge(const Point &a, const Point &b) const {
+		return (a.x() < x0 && b.x() < x0) || (a.x() > x1 && b.x() > x1) ||
+		       (a.y() < y0 && b.y() < y0) || (a.y() > y1 && b.y() > y1);
+	}
 	bool strictlyInside(const Point &p) const {
 		return p.x() > x0 && p.x() < x1 && p.y() > y0 && p.y() < y1;
 	}
@@ -965,7 +1047,9 @@ RingClip clipRing(const RectClipper &rc, const Ring &ring, std::vector<RectChain
 		const Point &b = ring[(start + k + 1) % n];
 		double t0, t1;
 		Point pa, pb;
-		const bool hit = rc.clipSegment(a, b, t0, t1, pa, pb) && t1 > t0;
+		// Most segments of a large polygon lie far from a small tile's box: reject
+		// those with four comparisons before the clip computation
+		const bool hit = !rc.beyondOneEdge(a, b) && rc.clipSegment(a, b, t0, t1, pa, pb) && t1 > t0;
 		if (!hit || (building && t0 > 0)) {
 			if (building && !finish()) return RingClip::Fail;
 			if (!hit) continue;
@@ -1132,4 +1216,42 @@ bool rect_clip(const MultiPolygon &mp, Box const &bbox, MultiPolygon &out) {
 	for (const Polygon &poly : mp)
 		if (!clipPolygon(rc, poly, out)) return false;
 	return true;
+}
+
+std::vector<Box> merge_nearby_boxes(std::vector<Box> boxes, double gap) {
+	// A merged box can grow to reach one it passed over, so repeat until a
+	// pass merges nothing.
+	bool merged = true;
+	while (merged) {
+		merged = false;
+		std::vector<Box> out;
+		for (const Box &box : boxes) {
+			const Box grown(
+				Point(box.min_corner().x() - gap, box.min_corner().y() - gap),
+				Point(box.max_corner().x() + gap, box.max_corner().y() + gap));
+			auto near = std::find_if(out.begin(), out.end(),
+				[&](const Box &other) { return geom::intersects(grown, other); });
+			if (near == out.end()) {
+				out.push_back(box);
+			} else {
+				geom::expand(*near, box);
+				merged = true;
+			}
+		}
+		boxes.swap(out);
+	}
+	return boxes;
+}
+
+std::vector<Box> multipolygon_index_boxes(const MultiPolygon &mp, double gap) {
+	const Box envelope = geom::return_envelope<Box>(mp);
+	if (mp.size() < 2) return { envelope };
+	std::vector<Box> outers;
+	double outersArea = 0;
+	for (const Polygon &poly : mp) {
+		outers.push_back(geom::return_envelope<Box>(poly.outer()));
+		outersArea += geom::area(outers.back());
+	}
+	if (geom::area(envelope) <= 4 * outersArea) return { envelope };
+	return merge_nearby_boxes(std::move(outers), gap);
 }

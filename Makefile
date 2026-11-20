@@ -6,7 +6,7 @@ PLATFORM_PATH := /usr/local
 # First, find what the Lua executable is called
 # - when a new Lua is released, then add it before 5.4 here
 LUA_CMD := $(shell luajit -e 'print("luajit")' 2> /dev/null || lua -e 'print("lua")' 2> /dev/null || lua5.4 -e 'print("lua5.4")' 2> /dev/null || lua5.3 -e 'print("lua5.3")' 2> /dev/null || lua5.2 -e 'print("lua5.2")' 2> /dev/null || lua5.1 -e 'print("lua5.1")' 2> /dev/null)
-ifeq ($(LUA_CMD),"")
+ifeq ($(LUA_CMD),)
   $(error Couldn't find Lua interpreter)
 endif
 $(info Using ${LUA_CMD})
@@ -156,6 +156,7 @@ test: \
 	test_append_vector \
 	test_attribute_store \
 	test_config_validator \
+	test_correct \
 	test_deque_map \
 	test_geom \
 	test_helpers \
@@ -163,6 +164,7 @@ test: \
 	test_pbf_reader \
 	test_pooled_string \
 	test_relation_roles \
+	test_shp_mem_tiles \
 	test_significant_tags \
 	test_sorted_node_store \
 	test_sorted_way_store \
@@ -192,6 +194,10 @@ src/config_schema.h: resources/config-schema.json
 	printf '\n)TMCONFIGSCHEMA";\n\n#endif //_CONFIG_SCHEMA_H\n' >> $@
 
 src/config_validator.o: src/config_schema.h
+
+test_correct: \
+	test/correct.test.o
+	$(CXX) $(CXXFLAGS) -o test.correct $^ $(INC) $(LIB) $(LDFLAGS) && ./test.correct
 
 test_deque_map: \
 	test/deque_map.test.o
@@ -261,6 +267,22 @@ test_sorted_way_store: \
 	src/sorted_way_store.o \
 	test/sorted_way_store.test.o
 	$(CXX) $(CXXFLAGS) -o test.sorted_way_store $^ $(INC) $(LIB) $(LDFLAGS) && ./test.sorted_way_store
+
+test_shp_mem_tiles: \
+	src/attribute_store.o \
+	src/coordinates.o \
+	src/coordinates_geom.o \
+	src/declutter.o \
+	src/geom.o \
+	src/mmap_allocator.o \
+	src/output_object.o \
+	src/pooled_string.o \
+	src/shp_mem_tiles.o \
+	src/tile_coordinates_set.o \
+	src/tile_data.o \
+	src/tile_sorting.o \
+	test/shp_mem_tiles.test.o
+	$(CXX) $(CXXFLAGS) -o test.shp_mem_tiles $^ $(INC) $(LIB) $(LDFLAGS) && ./test.shp_mem_tiles
 
 test_tile_coordinates_set: \
 	src/tile_coordinates_set.o \

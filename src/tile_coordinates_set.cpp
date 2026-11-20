@@ -40,6 +40,12 @@ void TileCoordinatesSet::forEachSet(const std::function<void(TileCoordinate x, T
 				f(x, y);
 }
 
+void TileCoordinatesSet::setBox(TileCoordinate minX, TileCoordinate maxX, TileCoordinate minY, TileCoordinate maxY) {
+	for (TileCoordinate x = minX; x <= maxX; x++)
+		for (TileCoordinate y = minY; y <= maxY; y++)
+			set(x, y);
+}
+
 PreciseTileCoordinatesSet::PreciseTileCoordinatesSet(unsigned int zoom):
 	zoom_(zoom),
 	numBits((uint64_t)(1 << zoom) * (1 << zoom)),
@@ -99,6 +105,35 @@ void PreciseTileCoordinatesSet::set(TileCoordinate x, TileCoordinate y) {
 	summary[w >> 12] |= (uint64_t)1 << ((w >> 6) & 63);
 }
 
+// Fills each row of the box word by word, rather than tile by tile.
+void PreciseTileCoordinatesSet::setBox(TileCoordinate minX, TileCoordinate maxX, TileCoordinate minY, TileCoordinate maxY) {
+	const uint64_t dim = 1ull << zoom_;
+	if (minX > maxX || minY > maxY || minX >= dim || minY >= dim)
+		return;
+	maxX = std::min<uint64_t>(maxX, dim - 1);
+	maxY = std::min<uint64_t>(maxY, dim - 1);
+	for (uint64_t x = minX; x <= maxX; x++) {
+		const uint64_t first = x * dim + minY, last = x * dim + maxY;
+		const uint64_t w0 = first >> 6, w1 = last >> 6;
+		for (uint64_t w = w0; w <= w1; w++) {
+			uint64_t mask = ~0ull;
+			if (w == w0) mask &= ~0ull << (first & 63);
+			if (w == w1) mask &= ~0ull >> (63 - (last & 63));
+			tiles[w] |= mask;
+		}
+		for (uint64_t block = w0 >> 6; block <= (w1 >> 6); block++)
+			summary[block >> 6] |= (uint64_t)1 << (block & 63);
+	}
+}
+
+void PreciseTileCoordinatesSet::merge(const PreciseTileCoordinatesSet& other) {
+	if (other.zoom_ != zoom_)
+		throw std::invalid_argument("PreciseTileCoordinatesSet::merge: zooms differ");
+	forEachMarkedWord(other.summary, numWords, [&](size_t w) { tiles[w] |= other.tiles[w]; });
+	for (size_t s = 0; s < summary.size(); s++)
+		summary[s] |= other.summary[s];
+}
+
 void PreciseTileCoordinatesSet::forEachSet(const std::function<void(TileCoordinate x, TileCoordinate y)>& f) const {
 	// loc = x * 2^zoom + y, so ascending loc order is x-major, y-minor.
 	// Only blocks marked in the summary can hold set bits; visiting them in
@@ -132,5 +167,26 @@ size_t LossyTileCoordinatesSet::zoom() const {
 
 void LossyTileCoordinatesSet::set(TileCoordinate x, TileCoordinate y) {
 	throw std::logic_error("LossyTileCoordinatesSet::set() is not implemented; LossyTileCoordinatesSet is read-only");
+}
+
+void LossyTileCoordinatesSet::forEachSet(const std::function<void(TileCoordinate x, TileCoordinate y)>& f) const {
+	// Expand the underlying set instead of testing all 4^zoom tiles (2^34 at z17).
+	// Its tiles arrive x-major, y-minor; one column of them becomes `scale`
+	// columns here, which keeps this set's order x-major, y-minor too.
+	std::vector<TileCoordinate> column;
+	TileCoordinate columnX = 0;
+	auto flush = [&]() {
+		for (TileCoordinate dx = 0; dx < scale; dx++)
+			for (TileCoordinate y : column)
+				for (TileCoordinate dy = 0; dy < scale; dy++)
+					f(columnX * scale + dx, y * scale + dy);
+		column.clear();
+	};
+	tiles.forEachSet([&](TileCoordinate x, TileCoordinate y) {
+		if (!column.empty() && x != columnX) flush();
+		columnX = x;
+		column.push_back(y);
+	});
+	if (!column.empty()) flush();
 }
 

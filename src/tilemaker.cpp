@@ -97,11 +97,19 @@ int main(const int argc, const char* argv[]) {
 #ifdef __GLIBC__
 	// glibc raises its mmap threshold dynamically (up to 32/64 MB) once a large
 	// mmapped chunk is freed; multi-MB buffers then land in per-thread arenas
-	// that are never trimmed, inflating peak RSS. Setting the trim threshold
-	// explicitly also disables that dynamic adjustment (the mmap threshold
-	// stays at its 128 KB default), unless the user tunes malloc via the environment.
-	if (!getenv("MALLOC_TRIM_THRESHOLD_") && !getenv("MALLOC_MMAP_THRESHOLD_") && !getenv("GLIBC_TUNABLES")) {
-		mallopt(M_TRIM_THRESHOLD, 4 << 20);
+	// that are never trimmed, inflating peak RSS. Setting malloc parameters
+	// explicitly turns that dynamic adjustment off, so both are set here:
+	// - a 16 MB top pad makes the heap grow and shrink in large steps; with many
+	//   threads allocating, the default 128 KB steps cost many brk() calls and
+	//   page faults
+	// - a fixed 8 MB mmap threshold: otherwise it would stay at 128 KB, and every
+	//   larger buffer would be a fresh mmap with zeroed pages. Boost's validity
+	//   check on a huge polygon grows such buffers over and over (one relation
+	//   with 1.9M points took 3x as long).
+	// Users who tune malloc via the environment keep their settings.
+	if (!getenv("MALLOC_TRIM_THRESHOLD_") && !getenv("MALLOC_MMAP_THRESHOLD_") && !getenv("MALLOC_TOP_PAD_") && !getenv("GLIBC_TUNABLES")) {
+		mallopt(M_TOP_PAD, 16 << 20);
+		mallopt(M_MMAP_THRESHOLD, 8 << 20);
 	}
 #endif
 
@@ -149,9 +157,9 @@ int main(const int argc, const char* argv[]) {
 	bool hasClippingBox = false;
 	Box clippingBox;
 	double minLon=std::numeric_limits<double>::max(),
-				 maxLon=std::numeric_limits<double>::min(),
+				 maxLon=std::numeric_limits<double>::lowest(),
 				 minLat=std::numeric_limits<double>::max(),
-				 maxLat=std::numeric_limits<double>::min();
+				 maxLat=std::numeric_limits<double>::lowest();
 	if (!bboxElements.empty()) {
 		hasClippingBox = true;
 		minLon = bboxElementFromStr(bboxElements.at(0));
@@ -191,8 +199,15 @@ int main(const int argc, const char* argv[]) {
 		rapidjson::FileReadStream is(fp.get(), readBuffer, sizeof(readBuffer));
 		jsonConfig.ParseStream(is);
 		if (jsonConfig.HasParseError()) {
+			// Translate the byte offset into line/column (re-read in the same text mode as openFile)
+			size_t line = 1, column = 1;
+			ifstream jsonFile(options.jsonFile);
+			char c;
+			for (size_t i = 0; i < jsonConfig.GetErrorOffset() && jsonFile.get(c); i++) {
+				if (c == '\n') { line++; column = 1; } else column++;
+			}
 			cerr << "Invalid JSON file: " << rapidjson::GetParseError_En(jsonConfig.GetParseError())
-			     << " at offset " << jsonConfig.GetErrorOffset() << "." << endl;
+			     << " at line " << line << ", column " << column << "." << endl;
 			return -1;
 		}
 
@@ -338,29 +353,35 @@ int main(const int argc, const char* argv[]) {
 		if (!infile) { cerr << "Couldn't open .pbf file " << inputFile << endl; return -1; }
 		
 		const bool hasSortTypeThenID = PbfHasOptionalFeature(inputFile, OptionSortTypeThenID);
-		int ret = pbfProcessor.ReadPbfFile(
-			nodeStore->shards(),
-			hasSortTypeThenID,
-			significantNodeTags,
-			significantWayTags,
-			options.threadNum,
-			[&]() {
-				thread_local std::pair<std::string, std::shared_ptr<ifstream>> pbfStream;
-				if (pbfStream.first != inputFile) {
-					pbfStream = std::make_pair(inputFile, std::make_shared<ifstream>(inputFile, ios::in | ios::binary));
-				}
-				return pbfStream.second;
-			},
-			[&]() {
-				thread_local std::pair<std::string, std::shared_ptr<OsmLuaProcessing>> osmLuaProcessing;
-				if (osmLuaProcessing.first != inputFile) {
-					osmLuaProcessing = std::make_pair(inputFile, std::make_shared<OsmLuaProcessing>(osmStore, config, layers, options.luaFile, shpMemTiles, osmMemTiles, attributeStore, declutter, options.osm.materializeGeometries, false));
-				}
-				return osmLuaProcessing.second;
-			},
-			*nodeStore,
-			*wayStore
-		);
+		int ret;
+		try {
+			ret = pbfProcessor.ReadPbfFile(
+				nodeStore->shards(),
+				hasSortTypeThenID,
+				significantNodeTags,
+				significantWayTags,
+				options.threadNum,
+				[&]() {
+					thread_local std::pair<std::string, std::shared_ptr<ifstream>> pbfStream;
+					if (pbfStream.first != inputFile) {
+						pbfStream = std::make_pair(inputFile, std::make_shared<ifstream>(inputFile, ios::in | ios::binary));
+					}
+					return pbfStream.second;
+				},
+				[&]() {
+					thread_local std::pair<std::string, std::shared_ptr<OsmLuaProcessing>> osmLuaProcessing;
+					if (osmLuaProcessing.first != inputFile) {
+						osmLuaProcessing = std::make_pair(inputFile, std::make_shared<OsmLuaProcessing>(osmStore, config, layers, options.luaFile, shpMemTiles, osmMemTiles, attributeStore, declutter, options.osm.materializeGeometries, false));
+					}
+					return osmLuaProcessing.second;
+				},
+				*nodeStore,
+				*wayStore
+			);
+		} catch (const std::exception& e) {
+			cerr << endl << "Error reading " << inputFile << ": " << e.what() << endl;
+			return -1;
+		}
 		if (ret != 0) return ret;
 	} 
 	attributeStore.finalize();
@@ -446,7 +467,7 @@ int main(const int argc, const char* argv[]) {
 		clock_gettime(CLOCK_MONOTONIC, &start);
 #endif
 		std::cout << "collecting tiles" << std::flush;
-		populateTilesAtZoom(sources, zoomResults);
+		populateTilesAtZoom(sources, zoomResults, options.threadNum);
 #ifdef CLOCK_MONOTONIC
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		uint64_t tileNs = 1e9 * (end.tv_sec - start.tv_sec) + end.tv_nsec - start.tv_nsec;
@@ -503,6 +524,17 @@ int main(const int argc, const char* argv[]) {
 	sortTileCoordinates(config.baseZoom, options.threadNum, tileCoordinates);
 
 	std::atomic<uint64_t> batchCounter(0);
+	// First error from a tile-writing worker; reported after pool.join()
+	// (an exception escaping a pool thread would call std::terminate)
+	std::atomic<bool> tileFailed(false);
+	std::string tileError;
+	std::mutex tileErrorMutex;
+	auto recordTileError = [&](unsigned int zoom, TileCoordinates coords, const std::string& what) {
+		const std::lock_guard<std::mutex> lock(tileErrorMutex);
+		if (tileFailed) return;
+		tileError = "z" + std::to_string(zoom) + "/" + std::to_string(coords.x) + "/" + std::to_string(coords.y) + ": " + what;
+		tileFailed = true;
+	};
 	const uint cutZoom = std::max<uint>(12, config.startZoom);
 	std::size_t batchSize = 0;
 	for(std::size_t startIndex = 0; startIndex < tileCoordinates.size(); startIndex += batchSize) {
@@ -530,13 +562,14 @@ int main(const int argc, const char* argv[]) {
 			batchSize++;
 		}
 
-		boost::asio::post(pool, [=, &tileCoordinates, &pool, &sharedData, &sources, &attributeStore, &io_mutex, &tilesWritten, &lastTilesWritten, &batchCounter]() {
+		boost::asio::post(pool, [=, &tileCoordinates, &pool, &sharedData, &sources, &attributeStore, &io_mutex, &tilesWritten, &lastTilesWritten, &batchCounter, &tileFailed, &recordTileError]() {
 			clipCacheBatchId = ++batchCounter;
 			// A single-tile batch has no descendants to reuse its clips.
 			clipCacheNoStore = batchSize == 1;
 			std::vector<std::string> tileTimings;
 			std::size_t endIndex = std::min(tileCoordinates.size(), startIndex + batchSize);
 			for(std::size_t i = startIndex; i < endIndex; ++i) {
+				if (tileFailed) return;
 				unsigned int zoom = tileCoordinates[i].first;
 				TileCoordinates coords = tileCoordinates[i].second;
 
@@ -546,11 +579,19 @@ int main(const int argc, const char* argv[]) {
 					clock_gettime(CLOCK_MONOTONIC, &start);
 #endif
 
-				std::vector<std::vector<OutputObjectID>> data;
-				for (auto source : sources) {
-					data.emplace_back(source->getObjectsForTile(sortOrders, zoom, coords));
+				try {
+					std::vector<std::vector<OutputObjectID>> data;
+					for (auto source : sources) {
+						data.emplace_back(source->getObjectsForTile(sortOrders, zoom, coords));
+					}
+					outputProc(sharedData, sources, attributeStore, data, coords, zoom);
+				} catch (const std::exception& e) {
+					recordTileError(zoom, coords, e.what());
+					return;
+				} catch (...) {
+					recordTileError(zoom, coords, "unknown exception");
+					return;
 				}
-				outputProc(sharedData, sources, attributeStore, data, coords, zoom);
 
 #ifdef CLOCK_MONOTONIC
 				if (options.logTileTimings) {
@@ -593,18 +634,27 @@ int main(const int argc, const char* argv[]) {
 	}
 	// Wait for all tasks in the pool to complete.
 	pool.join();
+	if (tileFailed) {
+		cerr << endl << "Error writing tile " << tileError << endl;
+		return -1;
+	}
 
 	// ----	Close tileset
 
-	if (options.outputMode == OptionsParser::OutputMode::MBTiles) {
-		sharedData.writeMBTilesMetadata(jsonConfig);
-		sharedData.mbtiles.closeForWriting();
-	} else if (options.outputMode == OptionsParser::OutputMode::PMTiles) {
-		sharedData.writePMTilesBounds();
-		std::string metadata = sharedData.pmTilesMetadata(jsonConfig);
-		sharedData.pmtiles.close(metadata);
-	} else {
-		sharedData.writeFileMetadata(jsonConfig);
+	try {
+		if (options.outputMode == OptionsParser::OutputMode::MBTiles) {
+			sharedData.writeMBTilesMetadata(jsonConfig);
+			sharedData.mbtiles.closeForWriting();
+		} else if (options.outputMode == OptionsParser::OutputMode::PMTiles) {
+			sharedData.writePMTilesBounds();
+			std::string metadata = sharedData.pmTilesMetadata(jsonConfig);
+			sharedData.pmtiles.close(metadata);
+		} else {
+			sharedData.writeFileMetadata(jsonConfig);
+		}
+	} catch (const std::exception& e) {
+		cerr << endl << "Error writing " << sharedData.outputFile << ": " << e.what() << endl;
+		return -1;
 	}
 
 #ifndef _MSC_VER

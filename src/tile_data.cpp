@@ -166,6 +166,13 @@ void TileDataSource::collectTilesWithObjectsAtZoom(std::vector<std::shared_ptr<T
 	collectTilesWithObjectsAtZoomTemplate<OutputObjectXYID>(indexZoom, objectsWithIds.begin(), objectsWithIds.size(), zooms);
 }
 
+void TileDataSource::collectTilesWithObjectsInShard(size_t shard, std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms) {
+	if (shard < objects.size())
+		collectTilesWithObjectsInShardTemplate<OutputObjectXY>(indexZoom, objects[shard], shard, zooms);
+	if (shard < objectsWithIds.size())
+		collectTilesWithObjectsInShardTemplate<OutputObjectXYID>(indexZoom, objectsWithIds[shard], shard, zooms);
+}
+
 void addCoveredTilesToOutput(const uint indexZoom, std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms, const Box& box) {
 	size_t maxZoom = zooms.size() - 1;
 // 	std::cout << "addCoveredTilesToOutput maxZoom=" << maxZoom << ", indexZoom - maxZoom = " << (indexZoom - maxZoom) << std::endl;
@@ -174,16 +181,11 @@ void addCoveredTilesToOutput(const uint indexZoom, std::vector<std::shared_ptr<T
 	TileCoordinate maxx = box.max_corner().x() / scale;
 	TileCoordinate miny = box.min_corner().y() / scale;
 	TileCoordinate maxy = box.max_corner().y() / scale;
-	for (int x=minx; x<=maxx; x++) {
-		for (int y=miny; y<=maxy; y++) {
-			size_t zx = x, zy = y;
-
-			for (int zoom = maxZoom; zoom >= 0; zoom--) {
-				zooms[zoom]->set(zx, zy);
-				zx /= 2;
-				zy /= 2;
-			}
-		}
+	// The parents of the tiles in the box are the tiles in the box scaled down
+	for (int zoom = maxZoom; zoom >= 0; zoom--) {
+		zooms[zoom]->setBox(minx, maxx, miny, maxy);
+		minx /= 2; maxx /= 2;
+		miny /= 2; maxy /= 2;
 	}
 }
 
@@ -385,7 +387,13 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 			}
 
 			MultiPolygon mp;
-			if (cachedClip == nullptr)
+			// rect_clip below needs the input as it was before fast_clip. For a large valid
+			// polygon, keep it rather than load it from the store again for every tile.
+			std::size_t inputPoints = 0;
+			if (cachedClip == nullptr && inputKnownValid)
+				for (auto const &p : uncached) inputPoints += geom::num_points(p);
+			const bool keepUncached = inputPoints > 1000;
+			if (cachedClip == nullptr && !keepUncached)
 				mp = std::move(uncached);
 			else
 				geom::assign(mp, input);
@@ -405,9 +413,9 @@ Geometry TileDataSource::buildWayGeometry(OutputGeometryType const geomType,
 				// instead, which is much cheaper than the is_valid/intersection/repair
 				// path below; rect_clip bails out on anything it can't handle.
 				MultiPolygon original;
-				if (cachedClip == nullptr) populateMultiPolygon(original, objectID);
+				if (cachedClip == nullptr && !keepUncached) populateMultiPolygon(original, objectID);
 				MultiPolygon clipped;
-				if (rect_clip(cachedClip == nullptr ? original : input, box, clipped) &&
+				if (rect_clip(cachedClip == nullptr && !keepUncached ? original : input, box, clipped) &&
 				    (multiPolygonDefinitelyValid(clipped) || geom::is_valid(clipped))) {
 					multiPolygonClipCache.add(bbox, objectID, clipped, true);
 					return clipped;
@@ -498,15 +506,46 @@ void TileDataSource::reportSize() const {
 
 void populateTilesAtZoom(
 	const std::vector<class TileDataSource *>& sources,
-	std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms
+	std::vector<std::shared_ptr<TileCoordinatesSet>>& zooms,
+	size_t threadNum
 ) {
 	if (zooms.size() > 15)
 		throw std::out_of_range("populateTilesAtZoom: expected at most z14 zooms (15), but found " + std::to_string(zooms.size()) + " vectors");
 
-	for(size_t i=0; i<sources.size(); i++) {
-		sources[i]->collectTilesWithObjectsAtZoom(zooms);
-		sources[i]->collectTilesWithLargeObjectsAtZoom(zooms);
+	std::vector<PreciseTileCoordinatesSet*> precise;
+	for (const auto& zoom : zooms)
+		precise.push_back(dynamic_cast<PreciseTileCoordinatesSet*>(zoom.get()));
+	const bool allPrecise = std::find(precise.begin(), precise.end(), nullptr) == precise.end();
+
+	if (threadNum <= 1 || !allPrecise) {
+		for (size_t i = 0; i < sources.size(); i++)
+			sources[i]->collectTilesWithObjectsAtZoom(zooms);
+	} else {
+		// Objects are kept per z6 tile. Each worker takes whole columns of z6
+		// tiles (so that it touches only its part of the bitmaps), sets bits in
+		// bitmaps of its own, and these are merged at the end.
+		std::atomic<size_t> nextColumn(0);
+		std::vector<std::vector<std::shared_ptr<TileCoordinatesSet>>> local(threadNum);
+		boost::asio::thread_pool pool(threadNum);
+		for (size_t t = 0; t < threadNum; t++) {
+			boost::asio::post(pool, [&, t]() {
+				auto& mine = local[t];
+				for (size_t zoom = 0; zoom < zooms.size(); zoom++)
+					mine.push_back(std::make_shared<PreciseTileCoordinatesSet>(zoom));
+				for (size_t column; (column = nextColumn++) < CLUSTER_ZOOM_WIDTH; )
+					for (size_t row = 0; row < CLUSTER_ZOOM_WIDTH; row++)
+						for (const auto source : sources)
+							source->collectTilesWithObjectsInShard(column * CLUSTER_ZOOM_WIDTH + row, mine);
+			});
+		}
+		pool.join();
+		for (const auto& mine : local)
+			for (size_t zoom = 0; zoom < mine.size(); zoom++)
+				precise[zoom]->merge(static_cast<const PreciseTileCoordinatesSet&>(*mine[zoom]));
 	}
+
+	for (size_t i = 0; i < sources.size(); i++)
+		sources[i]->collectTilesWithLargeObjectsAtZoom(zooms);
 }
 
 void sortOutputObjectIDs(
@@ -535,6 +574,25 @@ namespace {
 thread_local std::vector<TileCoordinates> tlsIndexTiles, tlsIndexTilesTmp;
 inline void releaseIfHuge(std::vector<TileCoordinates>& v) {
 	if (v.capacity() > (1u << 16)) std::vector<TileCoordinates>().swap(v);
+}
+
+// A large multipolygon whose envelope holds more than this many times the
+// tiles its outers cover is indexed by clusters of outers, not one envelope.
+constexpr double SPARSE_ENVELOPE_RATIO = 4;
+// Outers whose tile boxes are within this many tiles share a cluster.
+constexpr double OUTER_CLUSTER_GAP = 4;
+
+// The bounding box, in tile coordinates, of a non-empty list of tiles.
+Box tileEnvelope(const std::vector<TileCoordinates>& tiles) {
+	TileCoordinate minX = std::numeric_limits<TileCoordinate>::max(), maxX = 0;
+	TileCoordinate minY = std::numeric_limits<TileCoordinate>::max(), maxY = 0;
+	for (const TileCoordinates& index : tiles) {
+		minX = std::min(index.x, minX);
+		minY = std::min(index.y, minY);
+		maxX = std::max(index.x, maxX);
+		maxY = std::max(index.y, maxY);
+	}
+	return Box(geom::make<Point>(minX, minY), geom::make<Point>(maxX, maxY));
 }
 
 }
@@ -619,33 +677,39 @@ void TileDataSource::addGeometryToIndex(
 	// Each outer's tiles are sorted, unique and filled; concatenate them, then sort+unique if there are several outers
 	std::vector<TileCoordinates>& tiles = tlsIndexTiles;
 	std::vector<TileCoordinates>& tilesTmp = tlsIndexTilesTmp;
+	std::vector<Box> outerBoxes;
 	tiles.clear();
 	for (const auto& poly : geom) {
 		tilesTmp.clear();
 		insertIntermediateTiles(poly.outer(), indexZoom, tilesTmp);
 		fillCoveredTiles(tilesTmp);
+		if (!tilesTmp.empty()) outerBoxes.push_back(tileEnvelope(tilesTmp));
 		tiles.insert(tiles.end(), tilesTmp.begin(), tilesTmp.end());
 	}
 	if (geom.size() > 1) sortUniqueTiles(tiles);
 	releaseIfHuge(tilesTmp);
-	
-	TileCoordinate minTileX = std::numeric_limits<TileCoordinate>::max(), maxTileX = 0, minTileY = std::numeric_limits<TileCoordinate>::max(), maxTileY = 0;
-	for (const TileCoordinates& index : tiles) {
-		minTileX = std::min(index.x, minTileX);
-		minTileY = std::min(index.y, minTileY);
-		maxTileX = std::max(index.x, maxTileX);
-		maxTileY = std::max(index.y, maxTileY);
-	}
 
 	const size_t tileSetSize = tiles.size();
+	std::vector<Box> boxes;
+	if (tileSetSize >= 16) {
+		// Larger objects go in the rtree, by bounding box. When the outers are
+		// far apart, e.g. islands on both sides of the antimeridian, one box
+		// around them all is mostly empty, and every tile in it would clip the
+		// object to nothing; so each cluster of nearby outers gets its own box.
+		const Box envelope = tileEnvelope(tiles);
+		const double envelopeTiles =
+			(envelope.max_corner().x() - envelope.min_corner().x() + 1) *
+			(envelope.max_corner().y() - envelope.min_corner().y() + 1);
+		if (outerBoxes.size() > 1 && envelopeTiles > SPARSE_ENVELOPE_RATIO * tileSetSize)
+			boxes = merge_nearby_boxes(std::move(outerBoxes), OUTER_CLUSTER_GAP);
+		else
+			boxes.push_back(envelope);
+	}
+
 	for (auto& output : outputs) {
 		if (tileSetSize >= 16) {
-			// Larger objects - add to rtree
-			// note that the bbox is currently the envelope of the entire multipolygon,
-			// which is suboptimal in shapes like (_) ...... (_) where the outers are significantly disjoint
-			Box box = Box(geom::make<Point>(minTileX, minTileY),
-			              geom::make<Point>(maxTileX, maxTileY));
-			addObjectToLargeIndex(box, output, id);
+			for (const Box& box : boxes)
+				addObjectToLargeIndex(box, output, id);
 		} else {
 			// Smaller objects - add to each individual tile index
 			for (const TileCoordinates& index : tiles) {
@@ -660,7 +724,7 @@ NodeID TileDataSource::storePoint(const Point& input) {
 	const auto& store = pointStore.get(this);
 
 	NodeID offset = store.second->size();
-	store.second->emplace_back(input);
+	store.second->push_back(input);
 	NodeID rv = (store.first << (TILE_DATA_ID_SIZE - shardBits)) + offset;
 	return rv;
 }

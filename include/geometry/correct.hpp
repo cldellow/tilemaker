@@ -10,6 +10,8 @@
  * ----------------------------------------------------------------------------
  */
 
+#include <functional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <boost/geometry.hpp>
@@ -23,13 +25,18 @@ namespace geometry {
 
 namespace impl {
 
-template<typename C, typename T>
-static inline void result_combine(C &result, T &&new_element)
+// boxes[i] is the envelope of result[i]. Polygons whose envelopes are disjoint
+// cannot intersect, so the box test skips most of the costly intersects() calls
+// (otherwise quadratic in the number of rings, e.g. a lake with 14000 islands).
+template<typename C, typename B, typename T>
+static inline void result_combine(C &result, std::vector<B> &boxes, T &&new_element)
 {
     result.push_back(std::forward<T>(new_element));
+    boxes.push_back(boost::geometry::return_envelope<B>(result.back()));
 
    	for(std::size_t i = 0; i < result.size() - 1; ) {
-        if(!boost::geometry::intersects(result[i], result.back())) {
+        if(boost::geometry::disjoint(boxes[i], boxes.back()) ||
+           !boost::geometry::intersects(result[i], result.back())) {
             ++i;
             continue;
         }
@@ -43,8 +50,10 @@ static inline void result_combine(C &result, T &&new_element)
 		}
 
        	result.back() = std::move(union_result[0]);
+       	boxes.back() = boost::geometry::return_envelope<B>(result.back());
        	result.erase(result.begin() + i);
-    } 
+       	boxes.erase(boxes.begin() + i);
+    }
 }
 
 struct pseudo_vertice_key
@@ -199,26 +208,39 @@ static inline std::vector<ring_t> dissolve_generate_rings(
 
 	// Generate all polygons by tracing all the intersections
 	// Perform union to combine all polygons into single polygon again
-    while(!start_keys.empty()) {    
+	// Position of each point in the ring being traced. Its points are distinct until
+	// it closes, so a point already seen closes it: looking that up here instead of
+	// scanning the whole ring for every new point keeps tracing linear, not quadratic.
+	struct point_hash {
+		std::size_t operator()(std::pair<double, double> const &p) const {
+			return std::hash<double>()(p.first) * 31 + std::hash<double>()(p.second);
+		}
+	};
+	std::unordered_map<std::pair<double, double>, std::size_t, point_hash> seen;
+
+    while(!start_keys.empty()) {
 		ring_t new_ring;
-        
-		// Store point in generated polygon
-		auto push_point = [&new_ring](auto const &p) { 
-            if(new_ring.empty() || boost::geometry::comparable_distance(new_ring.back(), p) > 0)
-                new_ring.push_back(p);
-		};
+		seen.clear();
+		bool closed = false;
 
-		auto is_closed = [](ring_t &ring) {
-			if(ring.size() < 2) return false;
-			for(std::size_t i = 0; i < ring.size() - 1; ++i) {
-				if(boost::geometry::comparable_distance(ring[i], ring.back()) == 0) {
-					ring.erase(ring.begin(), ring.begin() + i);
-					return true;
-				}
+		// Store point in generated polygon; when it repeats an earlier point, the
+		// ring is closed and the points before that one are dropped
+		auto push_point = [&new_ring, &seen, &closed](auto const &p) {
+            if(!new_ring.empty() && !(boost::geometry::comparable_distance(new_ring.back(), p) > 0))
+                return;
+			new_ring.push_back(p);
+			// + 0.0 turns -0.0 into 0.0, which compares equal to it
+			std::pair<double, double> key(boost::geometry::get<0>(p) + 0.0, boost::geometry::get<1>(p) + 0.0);
+			auto found = seen.find(key);
+			if(found == seen.end()) {
+				seen.emplace(key, new_ring.size() - 1);
+			} else {
+				new_ring.erase(new_ring.begin(), new_ring.begin() + found->second);
+				closed = true;
 			}
-
-			return false;
 		};
+
+		auto is_closed = [&closed](ring_t &) { return closed; };
 
         auto start_iter = pseudo_vertices.find(*start_keys.begin());
         auto i = start_iter;
@@ -302,13 +324,15 @@ template<
 	>
 struct combine_non_zero_winding
 {
-	inline void operator()(multi_polygon_t &combined_outers, multi_polygon_t &combined_inners, polygon_t &poly) 
+	using box_t = boost::geometry::model::box<point_t>;
+
+	inline void operator()(multi_polygon_t &combined_outers, std::vector<box_t> &outer_boxes, multi_polygon_t &combined_inners, std::vector<box_t> &inner_boxes, polygon_t &poly)
 	{
 		if(boost::geometry::area(poly) > 0)
-			result_combine(combined_outers, std::move(poly));
+			result_combine(combined_outers, outer_boxes, std::move(poly));
 		else {
 			std::reverse(poly.outer().begin(), poly.outer().end());
-			result_combine(combined_inners, std::move(poly));
+			result_combine(combined_inners, inner_boxes, std::move(poly));
 		}
 	}
 };
@@ -320,7 +344,9 @@ template<
 	>
 struct combine_odd_even
 {
-	inline void operator()(multi_polygon_t &combined_outers, multi_polygon_t &combined_inners, polygon_t &poly) 
+	using box_t = boost::geometry::model::box<point_t>;
+
+	inline void operator()(multi_polygon_t &combined_outers, std::vector<box_t> &, multi_polygon_t &combined_inners, std::vector<box_t> &, polygon_t &poly)
 	{
 		if(boost::geometry::area(poly) < 0)
 			std::reverse(poly.outer().begin(), poly.outer().end());
@@ -346,11 +372,12 @@ static inline void correct(polygon_t const &input, multi_polygon_t &output, doub
 	// Calculate all outers and combine them if possible
 	multi_polygon_t combined_outers;
 	multi_polygon_t combined_inners;
+	std::vector<boost::geometry::model::box<point_t>> outer_boxes, inner_boxes;
 
 	for(auto &ring: outer_rings) {
 		polygon_t poly;
 		poly.outer() = std::move(ring);
-		combine(combined_outers, combined_inners, poly);
+		combine(combined_outers, outer_boxes, combined_inners, inner_boxes, poly);
 	}
 
 	// Calculate all inners and combine them if possible
@@ -362,8 +389,8 @@ static inline void correct(polygon_t const &input, multi_polygon_t &output, doub
 		correct(poly, new_inners, remove_spike_min_area, combine);
 
 		for(auto &poly: new_inners) {
-			result_combine(combined_inners, std::move(poly));
-		} 
+			result_combine(combined_inners, inner_boxes, std::move(poly));
+		}
 	}
 
 	// Cut out all inners from all the outers
@@ -379,13 +406,18 @@ template<
 	>
 static inline void correct(multi_polygon_t const &input, multi_polygon_t &output, double remove_spike_min_area, combine_function_t combine)
 {
+	using box_t = boost::geometry::model::box<point_t>;
+	std::vector<box_t> output_boxes;
+	for(auto const &polygon: output)
+		output_boxes.push_back(boost::geometry::return_envelope<box_t>(polygon));
+
 	for(auto const &polygon: input)
 	{
 		multi_polygon_t new_polygons;
 		correct(polygon, new_polygons, remove_spike_min_area, combine);
 
-		for(auto &new_polygon: new_polygons) 
-			result_combine(output, std::move(new_polygon));
+		for(auto &new_polygon: new_polygons)
+			result_combine(output, output_boxes, std::move(new_polygon));
 	}
 }
 

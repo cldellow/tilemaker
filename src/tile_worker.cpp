@@ -99,12 +99,31 @@ void ReorderMultiLinestring(MultiLinestring &input, MultiLinestring &output) {
 	}
 }
 
-void RemovePartsBelowSize(MultiPolygon &g, double filterArea) {
+// A small ring is dropped unless it is a slice cut by clipping that is visible in
+// this tile. A ring strictly inside the tile's clipping box was not cut (the actual
+// clip box is never smaller than clippingBox), so its area here is its real area.
+// A ring entirely outside the tile itself only lies in the buffer and is never
+// rendered here; the neighbouring tile judges it on its own.
+static bool CanDropRing(const Ring &ring, const TileBbox &bbox) {
+	Box env = geom::return_envelope<Box>(ring);
+	const Box &clip = bbox.clippingBox;
+	bool insideClippingBox =
+		env.min_corner().x() > clip.min_corner().x() &&
+		env.min_corner().y() > clip.min_corner().y() &&
+		env.max_corner().x() < clip.max_corner().x() &&
+		env.max_corner().y() < clip.max_corner().y();
+	bool outsideTile =
+		env.max_corner().x() <= bbox.minLon  || env.min_corner().x() >= bbox.maxLon ||
+		env.max_corner().y() <= bbox.minLatp || env.min_corner().y() >= bbox.maxLatp;
+	return insideClippingBox || outsideTile;
+}
+
+void RemovePartsBelowSize(MultiPolygon &g, double filterArea, const TileBbox &bbox) {
 	g.erase(std::remove_if(
 		g.begin(),
 		g.end(),
 		[&](const Polygon &poly) -> bool {
-			return std::fabs(geom::area(poly)) < filterArea;
+			return std::fabs(geom::area(poly)) < filterArea && CanDropRing(poly.outer(), bbox);
 		}),
 	g.end());
 	for (auto &outer : g) {
@@ -112,7 +131,7 @@ void RemovePartsBelowSize(MultiPolygon &g, double filterArea) {
 			outer.inners().begin(), 
 			outer.inners().end(), 
 			[&](const Ring &inner) -> bool { 
-				return std::fabs(geom::area(inner)) < filterArea;
+				return std::fabs(geom::area(inner)) < filterArea && CanDropRing(inner, bbox);
 			}),
 		outer.inners().end());
 	}
@@ -149,6 +168,10 @@ void writeMultiLinestring(
 				// buildings algorithm not supported for linestrings, so fall back to DP
 				tmp.push_back(simplify(ls, simplifyLevel));
 			}
+			// A small closed way (e.g. a roundabout) can collapse to its start point,
+			// or to an out-and-back spike: keep it unsimplified instead
+			if (tmp.back().size() < 4 && ls.size() >= 4 && boost::geometry::equals(ls.front(), ls.back()))
+				tmp.back() = ls;
 		}
 		toWrite = &tmp;
 	} else {
@@ -208,16 +231,20 @@ bool writeRing(
 	// vtzero doesn't like zero-length segments in rings
 	pair<int, int> lastXy = std::make_pair(0, 0);
 	int points = 0;
+	int64_t twiceArea = 0;
 	for (const Point& point : ring) {
 		pair<int, int> xy = std::make_pair(point.get<0>(), point.get<1>());
 		if (points == 0 || xy != lastXy) {
+			if (points > 0)
+				twiceArea += int64_t(lastXy.first) * xy.second - int64_t(xy.first) * lastXy.second;
 			points++;
 			lastXy = xy;
 		}
 	}
 
-	// A ring has at least 4 points.
-	if (points <= 3)
+	// A ring has at least 4 points, and on the integer grid it must not have
+	// collapsed to a line (all points collinear).
+	if (points <= 3 || twiceArea == 0)
 		return false;
 
 	bool firstPoint = true;
@@ -435,8 +462,12 @@ void ProcessObjects(
 				// Append successive linestrings, then reorder afterwards
 				while (jt<(ooSameLayerEnd-1) && oo.oo.compatible((jt+1)->oo)) {
 					jt++;
-					MultiLinestring to_merge = boost::get<MultiLinestring>(source->buildWayGeometry(jt->oo.geomType, jt->oo.objectID, bbox));
-					for (auto &ls : to_merge) boost::get<MultiLinestring>(g).emplace_back(ls);
+					try {
+						MultiLinestring to_merge = boost::get<MultiLinestring>(source->buildWayGeometry(jt->oo.geomType, jt->oo.objectID, bbox));
+						for (auto &ls : to_merge) boost::get<MultiLinestring>(g).emplace_back(ls);
+					} catch (std::out_of_range &err) {
+						if (verbose) cerr << "Error while processing geometry " << jt->oo.geomType << "," << static_cast<int>(jt->oo.objectID) <<"," << err.what() << endl;
+					}
 				}
 				MultiLinestring reordered;
 				ReorderMultiLinestring(boost::get<MultiLinestring>(g), reordered);
@@ -448,7 +479,11 @@ void ProcessObjects(
 				std::vector<MultiPolygon> mps;
 				while (jt<(ooSameLayerEnd-1) && oo.oo.compatible((jt+1)->oo)) {
 					jt++;
-					mps.emplace_back( boost::get<MultiPolygon>(source->buildWayGeometry(jt->oo.geomType, jt->oo.objectID, bbox)) );
+					try {
+						mps.emplace_back( boost::get<MultiPolygon>(source->buildWayGeometry(jt->oo.geomType, jt->oo.objectID, bbox)) );
+					} catch (std::out_of_range &err) {
+						if (verbose) cerr << "Error while processing geometry " << jt->oo.geomType << "," << static_cast<int>(jt->oo.objectID) <<"," << err.what() << endl;
+					}
 				}
 				if (!mps.empty()) { 
 					mps.emplace_back(boost::get<MultiPolygon>(g));
@@ -458,7 +493,7 @@ void ProcessObjects(
 			}
 
 			if (oo.oo.geomType == POLYGON_ && filterArea > 0.0) {
-				RemovePartsBelowSize(boost::get<MultiPolygon>(g), filterArea);
+				RemovePartsBelowSize(boost::get<MultiPolygon>(g), filterArea, bbox);
 				if (geom::is_empty(g)) continue;
 			}
 
